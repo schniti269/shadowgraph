@@ -1,0 +1,12 @@
+.vscode/**
+src/client/**
+src/test/**
+node_modules/**
+**/*.ts
+!src/server/**
+tsconfig.json
+esbuild.js
+pyproject.toml
+.gitignore
+**/*.map
+InfosOnVsCodeExtenions.txt
