@@ -1,0 +1,98 @@
+{
+    "name": "shadowgraph",
+    "displayName": "ShadowGraph",
+    "description": "A semantic shadow layer for codebases — link thoughts, requirements, and notes to code symbols via AST anchoring.",
+    "version": "0.1.0",
+    "publisher": "shadowgraph",
+    "engines": {
+        "vscode": "^1.96.0"
+    },
+    "categories": [
+        "Other",
+        "AI"
+    ],
+    "activationEvents": [
+        "onStartupFinished"
+    ],
+    "main": "./dist/extension.js",
+    "contributes": {
+        "mcpServerDefinitionProviders": [
+            {
+                "id": "shadowgraph.mcpServer",
+                "label": "ShadowGraph MCP Server"
+            }
+        ],
+        "commands": [
+            {
+                "command": "shadowgraph.initialize",
+                "title": "ShadowGraph: Initialize Database"
+            },
+            {
+                "command": "shadowgraph.indexCurrentFile",
+                "title": "ShadowGraph: Index Current File"
+            },
+            {
+                "command": "shadowgraph.checkDrift",
+                "title": "ShadowGraph: Check Drift"
+            },
+            {
+                "command": "shadowgraph.showThoughts",
+                "title": "ShadowGraph: Show Thoughts for Symbol"
+            },
+            {
+                "command": "shadowgraph.addThought",
+                "title": "ShadowGraph: Add Thought to Symbol"
+            },
+            {
+                "command": "shadowgraph.showStatus",
+                "title": "ShadowGraph: Show Server Status & Debug Info"
+            },
+            {
+                "command": "shadowgraph.runDiagnostics",
+                "title": "ShadowGraph: Run Diagnostics"
+            }
+        ],
+        "configuration": {
+            "title": "ShadowGraph",
+            "properties": {
+                "shadowgraph.pythonPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Path to Python 3.10+ executable. If empty, uses 'python3' or 'python' from PATH."
+                },
+                "shadowgraph.enableCodeLens": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show thought count CodeLens above functions with linked thoughts."
+                },
+                "shadowgraph.enableStaleDecorations": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show gutter warnings for functions with stale AST anchors."
+                },
+                "shadowgraph.autoIndex": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Automatically index files on save."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "node esbuild.js --production",
+        "build": "node esbuild.js",
+        "watch": "node esbuild.js --watch",
+        "package": "vsce package",
+        "test:python": "pytest src/test/server -v",
+        "test": "npm run test:python"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.96.0",
+        "@types/node": "^20.0.0",
+        "esbuild": "^0.24.0",
+        "typescript": "^5.6.0"
+    },
+    "dependencies": {
+        "sql.js": "^1.11.0"
+    }
+}

@@ -1,0 +1,3 @@
+mcp>=1.26.0
+tree-sitter>=0.24.0
+tree-sitter-language-pack>=0.13.0
