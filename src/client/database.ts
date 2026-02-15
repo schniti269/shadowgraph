@@ -101,28 +101,59 @@ export class ShadowDatabase {
             return [];
         }
 
-        const stmt = this.db.prepare(`
-            SELECT n.id, n.content, n.created_at FROM nodes n
-            JOIN edges e ON e.target_id = n.id
-            JOIN anchors a ON a.node_id = e.source_id
-            WHERE a.file_path = :filePath
-              AND a.symbol_name = :symbolName
-              AND n.type = 'THOUGHT'
-            ORDER BY n.created_at DESC
-        `);
-        stmt.bind({ ':filePath': filePath, ':symbolName': symbolName });
+        try {
+            const stmt = this.db.prepare(`
+                SELECT n.id, n.content, COALESCE(n.created_at, '') as created_at FROM nodes n
+                JOIN edges e ON e.target_id = n.id
+                JOIN anchors a ON a.node_id = e.source_id
+                WHERE a.file_path = :filePath
+                  AND a.symbol_name = :symbolName
+                  AND n.type = 'THOUGHT'
+                ORDER BY n.created_at DESC
+            `);
+            stmt.bind({ ':filePath': filePath, ':symbolName': symbolName });
 
-        const results: ThoughtRow[] = [];
-        while (stmt.step()) {
-            const row = stmt.getAsObject();
-            results.push({
-                id: row['id'] as string,
-                content: row['content'] as string,
-                created_at: row['created_at'] as string | undefined,
-            });
+            const results: ThoughtRow[] = [];
+            while (stmt.step()) {
+                const row = stmt.getAsObject();
+                results.push({
+                    id: row['id'] as string,
+                    content: row['content'] as string,
+                    created_at: (row['created_at'] as string) || undefined,
+                });
+            }
+            stmt.free();
+            return results;
+        } catch (err) {
+            // Database schema doesn't have created_at yet - fallback to basic query
+            console.log('[ShadowGraph] Schema migration needed, using fallback query');
+            try {
+                const stmt = this.db.prepare(`
+                    SELECT n.id, n.content FROM nodes n
+                    JOIN edges e ON e.target_id = n.id
+                    JOIN anchors a ON a.node_id = e.source_id
+                    WHERE a.file_path = :filePath
+                      AND a.symbol_name = :symbolName
+                      AND n.type = 'THOUGHT'
+                `);
+                stmt.bind({ ':filePath': filePath, ':symbolName': symbolName });
+
+                const results: ThoughtRow[] = [];
+                while (stmt.step()) {
+                    const row = stmt.getAsObject();
+                    results.push({
+                        id: row['id'] as string,
+                        content: row['content'] as string,
+                        created_at: undefined,
+                    });
+                }
+                stmt.free();
+                return results;
+            } catch (fallbackErr) {
+                console.error('[ShadowGraph] Failed to query thoughts:', fallbackErr);
+                return [];
+            }
         }
-        stmt.free();
-        return results;
     }
 
     getAnchorsForFile(filePath: string): AnchorRow[] {

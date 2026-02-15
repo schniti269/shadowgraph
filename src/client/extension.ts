@@ -49,9 +49,6 @@ export async function activate(context: vscode.ExtensionContext) {
         return;
     }
 
-    // Register MCP server definition provider
-    const onDidChange = new vscode.EventEmitter<void>();
-
     // CRITICAL: Use absolute path via extensionUri, not relative path
     const serverScript = vscode.Uri.joinPath(
         context.extensionUri,
@@ -62,47 +59,42 @@ export async function activate(context: vscode.ExtensionContext) {
 
     console.log('[ShadowGraph] Server script path:', serverScript);
     console.log('[ShadowGraph] Python executable:', pythonInfo.pythonPath);
-    console.log('[ShadowGraph] Database path:', dbPath);
-    console.log('[ShadowGraph] Workspace folder:', workspaceFolder.uri.fsPath);
 
-    const provider: vscode.McpServerDefinitionProvider = {
-        onDidChangeMcpServerDefinitions: onDidChange.event,
-
-        provideMcpServerDefinitions: async () => {
-            console.log('[ShadowGraph] Providing MCP server definition');
-            console.log('[ShadowGraph] Server command will be:', pythonInfo.pythonPath, serverScript);
-
-            try {
-                const definition = new vscode.McpStdioServerDefinition({
-                    label: 'ShadowGraph',
-                    command: pythonInfo.pythonPath,
-                    args: [serverScript],
-                    cwd: workspaceFolder.uri.fsPath,
-                    env: {
-                        SHADOW_DB_PATH: dbPath,
-                        PYTHONDONTWRITEBYTECODE: '1',
-                        PYTHONPATH: path.join(context.extensionPath, 'src', 'server'),
-                    },
-                    version: '1.0.0',
-                });
-                console.log('[ShadowGraph] MCP definition created successfully');
-                return [definition];
-            } catch (err) {
-                console.error('[ShadowGraph] Error creating MCP definition:', err);
-                throw err;
-            }
-        },
-
-        resolveMcpServerDefinition: async (def) => {
-            console.log('[ShadowGraph] Resolving MCP server definition');
-            return def;
-        },
-    };
-
+    // Register MCP server definition provider with POSITIONAL ARGUMENTS
     context.subscriptions.push(
         vscode.lm.registerMcpServerDefinitionProvider(
             'shadowgraph.mcpServer',
-            provider
+            {
+                provideMcpServerDefinitions: async () => {
+                    console.log('[ShadowGraph] Copilot is asking for tools...');
+
+                    try {
+                        // FIX: Use positional arguments, not options object
+                        // Arg 1: Label (string)
+                        // Arg 2: Command (string)
+                        // Arg 3: Args (string[])
+                        // Arg 4: Options (environment variables, etc.)
+                        const server = new vscode.McpStdioServerDefinition(
+                            'ShadowGraph Tools',  // Label
+                            pythonInfo.pythonPath,  // Command
+                            [serverScript],  // Args
+                            {  // Options
+                                env: {
+                                    SHADOW_DB_PATH: dbPath,
+                                    PYTHONDONTWRITEBYTECODE: '1',
+                                    PYTHONPATH: path.join(context.extensionPath, 'src', 'server'),
+                                },
+                            }
+                        );
+
+                        console.log('[ShadowGraph] MCP definition created successfully');
+                        return [server];
+                    } catch (err) {
+                        console.error('[ShadowGraph] Error creating MCP definition:', err);
+                        throw err;
+                    }
+                },
+            }
         )
     );
 
