@@ -621,26 +621,34 @@ def create_file(path: str, content: str, language: str = "python", description: 
         JSON with code_node_id, created_at, verified_node, and next steps
     """
     logger.debug(f"create_file() called for {path}")
+    logger.debug(f"Current working directory: {os.getcwd()}")
+    logger.debug(f"Absolute path will be: {os.path.abspath(path)}")
 
     try:
-        import os
-
         # Check file doesn't exist
         if os.path.exists(path):
+            logger.warning(f"File already exists: {path}")
             return json.dumps({"status": "error", "message": f"File already exists: {path}"})
 
         # Create parent directories
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        parent_dir = os.path.dirname(path) or "."
+        logger.debug(f"Creating parent directory: {parent_dir}")
+        os.makedirs(parent_dir, exist_ok=True)
 
         # Write file (atomic: write to temp, move to target)
         temp_path = path + ".tmp"
         try:
+            logger.debug(f"Writing content to temp file: {temp_path}")
             with open(temp_path, "w") as f:
                 f.write(content)
+            logger.debug(f"Renaming temp file to: {path}")
             os.rename(temp_path, path)
-            logger.info(f"File created: {path}")
+            logger.info(f"File created successfully: {path}")
+            logger.debug(f"File exists after creation: {os.path.exists(path)}")
+            logger.debug(f"File size: {os.path.getsize(path)} bytes")
         except Exception as e:
             if os.path.exists(temp_path):
+                logger.debug(f"Cleaning up temp file: {temp_path}")
                 os.remove(temp_path)
             raise e
 

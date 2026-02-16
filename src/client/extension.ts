@@ -79,6 +79,7 @@ export async function activate(context: vscode.ExtensionContext) {
                             pythonInfo.pythonPath,  // Command
                             [serverScript],  // Args
                             {  // Options
+                                cwd: workspaceFolder.uri.fsPath,  // CRITICAL: Set working directory for file creation tools
                                 env: {
                                     SHADOW_DB_PATH: dbPath,
                                     PYTHONDONTWRITEBYTECODE: '1',
