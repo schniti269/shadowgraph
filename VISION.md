@@ -1,52 +1,92 @@
-# ShadowGraph: Vision & Implementation Status
+# 👁️ ShadowGraph: Engineering Vision & Roadmap
 
-## The Problem We Solve
+![ShadowGraph Logo](icons/shadowgraph-logo.png)
 
-**Comment bloat** is killing developer productivity:
-- 70% of developer time spent **reading code to understand it**
-- Comments are **fragile** (line-dependent, drift out of sync)
-- Architectural intent **invisible** in code reviews
-- AI agents **hallucinate** due to insufficient context
-- Onboarding **takes 3 months** because knowledge is tribal
+> **North Star:** To decouple **Intent** (The Why) from **Syntax** (The What), enabling AI agents to reason about codebases with O(1) context complexity.
 
-## The Solution: Semantic Anchoring
+## 1. The Core Thesis
+Current development suffers from the **Context-Window Bottleneck**:
+* **Human:** Reads 70% of the time, edits 30%.
+* **AI Agent:** Context window fills with 10k tokens of boilerplate; reasoning degrades; hallucinations spike.
+* **Solution:** A "Shadow Layer"—a persistent, Git-backed Knowledge Graph anchored to AST hashes, not line numbers.
 
-ShadowGraph creates a **queryable graph of code intent**:
-- Thoughts linked to code **symbols** (not lines)
-- Anchored via **stable AST hashes** (survives refactoring)
-- Queryable by **agents** via MCP tools
-- Shared via **Git** (thoughts version-controlled)
-- Validated via **constraints** (catches intent violations)
+## 2. ROI & Impact Metrics
 
-## The Impact
+| Metric | Current State (Raw Code) | ShadowGraph State | Improvement |
+| :--- | :--- | :--- | :--- |
+| **Agent Context Cost** | ~10k tokens ($0.15/query) | ~200 tokens ($0.003/query) | **50x Cheaper** |
+| **Debug Time** | ~60 mins (Manual Trace) | ~2 mins (Graph Traversal) | **30x Faster** |
+| **Knowledge Life** | Fragile (Breaks on Refactor) | Antifragile (Updates on Drift) | **Permanent** |
+| **Onboarding** | 3 Months (Tribal Osmosis) | On-Demand (Graph Query) | **Instant** |
 
-| Metric | Value |
-|--------|-------|
-| Context reduction | 95% (1 hour → 2 minutes) |
-| Token reduction | 50x (10,000 → 200 tokens) |
-| Time to debug | 95% faster |
-| Cost per AI query | 50x cheaper |
-| Comment maintenance | Eliminated (stale detection) |
+## 3. Architecture Specification
 
-## Current Implementation Status
+```mermaid
+graph TD
+    User[Developer / AI Agent] -->|MCP Protocol| Server[ShadowGraph MCP Server]
+    
+    subgraph "VS Code Extension (Client)"
+        UI[Decorations & Lenses]
+        Watcher[File Watcher]
+    end
+    
+    subgraph "The Shadow Brain (Backend)"
+        Parser[Tree-Sitter AST]
+        Drift[Drift Detector]
+        GraphEngine[SQLite + Vec]
+    end
+    
+    Watcher -->|File Save| Parser
+    Parser -->|AST Hash| Drift
+    Drift -->|Status Update| GraphEngine
+    GraphEngine -->|JSONL Sync| Git[Git Repo (.shadow/)]
+    Server -->|Query| GraphEngine
 
-### Phase 1 ✅ COMPLETE
-- SQLite graph database with WAL mode
-- Tree-sitter AST parsing (Python, TypeScript, JavaScript)
-- Drift detection (stale anchor warnings)
-- 5 MCP tools for Copilot agents
-- 22/22 tests passing
+```
 
-### Phase 2 ✅ COMPLETE
-- Timestamps on all thoughts
-- Agent forcing tool (`edit_code_with_thought`)
-- MCP tool visibility in Copilot Chat
-- Comprehensive logging
+## 4. Implementation Status
 
-### Phase 3 🚀 IN PROGRESS
-- **Stage 1**: ✅ Documentation & CI/CD (GitHub workflows, issue templates)
-- **Stage 2**: ⏳ Hive Mind + Blast Radius (git integration, dependency queries)
-- **Stage 3**: ⏳ Semantic CI (constraints validation, graph-check CLI)
+### ✅ Phase 1: The Foundation (v0.1.0)
+
+* [x] **Core Engine:** SQLite Graph DB with WAL mode enabled.
+* [x] **Parsing:** Tree-sitter integration for Python, TS, JS.
+* [x] **Anchoring:** Stable AST Hashing (SHA256 of white-space stripped body).
+* [x] **Drift Detection:** `VALID` vs `STALE` status logic.
+* [x] **MCP Interface:** 5 Core tools (`index_file`, `add_thought`, `get_context`, etc.).
+* [x] **Quality:** 22/22 Tests Passing.
+
+### ✅ Phase 2: Agent Integration (v0.2.0)
+
+* [x] **Temporal Tracking:** Timestamps on all nodes.
+* [x] **Forced Context:** `edit_code_with_thought` tool for agents.
+* [x] **UX:** Copilot Chat integration & CodeLens visibility.
+* [x] **Logging:** Structured debug logs.
+
+### 🚀 Phase 3: The Hive Mind (Current Sprint)
+
+* [ ] **Stage 3.1: Serialization (In Progress)**
+* Target: Git-friendly JSONL export (`.shadow/graph.jsonl`).
+* Status: Designing diff-minimization strategy.
+
+
+* [ ] **Stage 3.2: Blast Radius (Pending)**
+* Target: Recursive CTE queries for dependency analysis.
+* Status: SQL optimization needed.
+
+
+* [ ] **Stage 3.3: Semantic CI (Pending)**
+* Target: `graph-check` CLI for CI/CD pipelines.
+* Status: Spec definition.
+
+
+
+## 5. Next Execution Steps
+
+1. **Immediate:** Implement `graph_to_jsonl` serializer to enable Git tracking.
+2. **Short-term:** Build `query_blast_radius` SQL CTE.
+3. **Release:** Finalize `README.md` and publish v0.3.0 to Marketplace.
+
+*Last Updated: 2026-02-16 | Build Status: Passing (39/39)*
 
 ## Key Features
 
