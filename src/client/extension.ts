@@ -51,14 +51,13 @@ export async function activate(context: vscode.ExtensionContext) {
     }
 
     // CRITICAL: Use absolute path via extensionUri, not relative path
-    const serverScript = vscode.Uri.joinPath(
-        context.extensionUri,
-        'src',
-        'server',
-        'main.py'
-    ).fsPath;
+    const extensionPath = context.extensionUri.fsPath;
+    const serverScript = path.join(extensionPath, 'src', 'server', 'main.py');
+    const serverDir = path.join(extensionPath, 'src', 'server');
 
+    console.log('[ShadowGraph] Extension path:', extensionPath);
     console.log('[ShadowGraph] Server script path:', serverScript);
+    console.log('[ShadowGraph] Server dir for PYTHONPATH:', serverDir);
     console.log('[ShadowGraph] Python executable:', pythonInfo.pythonPath);
 
     // Register MCP server definition provider with POSITIONAL ARGUMENTS
@@ -83,7 +82,7 @@ export async function activate(context: vscode.ExtensionContext) {
                                 env: {
                                     SHADOW_DB_PATH: dbPath,
                                     PYTHONDONTWRITEBYTECODE: '1',
-                                    PYTHONPATH: path.join(context.extensionPath, 'src', 'server'),
+                                    PYTHONPATH: serverDir,
                                 },
                             }
                         );

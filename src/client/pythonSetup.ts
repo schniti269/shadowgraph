@@ -34,7 +34,7 @@ export async function ensurePythonEnv(
             await execFileAsync(systemPython, ['-m', 'venv', venvPath]);
 
             progress.report({ message: 'Installing dependencies...' });
-            const reqPath = path.join(context.extensionPath, 'requirements.txt');
+            const reqPath = path.join(context.extensionUri.fsPath, 'requirements.txt');
             await execFileAsync(venvPython, [
                 '-m',
                 'pip',
