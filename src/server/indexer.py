@@ -43,6 +43,57 @@ def get_symbol_type_prefix(node_type: str) -> str:
     return "function"
 
 
+def extract_imports(file_path: str) -> list[str]:
+    """Extract import statements from a file.
+
+    Returns a list of module names imported, e.g., ["os", "json", "my_module"].
+    Used to populate DEPENDS_ON edges in the graph.
+    """
+    path = Path(file_path)
+    ext = path.suffix
+    language = LANG_MAP.get(ext)
+    if not language:
+        return []
+
+    source_code = path.read_bytes()
+    parser = get_parser(language)
+    tree = parser.parse(source_code)
+    root = tree.root_node
+
+    imports: list[str] = []
+
+    def walk(node):
+        # Python: import_statement, import_from_statement
+        if language == "python":
+            if node.type == "import_statement":
+                # import x, y as z
+                for child in node.children:
+                    if child.type == "dotted_name" or child.type == "identifier":
+                        imports.append(child.text.decode("utf-8"))
+            elif node.type == "import_from_statement":
+                # from x import y
+                for child in node.children:
+                    if child.type == "dotted_name" or child.type == "identifier":
+                        if child.text != b"from" and child.text != b"import":
+                            imports.append(child.text.decode("utf-8"))
+
+        # TypeScript/JavaScript: import_statement
+        elif language in ("typescript", "tsx", "javascript"):
+            if node.type == "import_statement":
+                for child in node.children:
+                    # import { x } from 'module'
+                    if child.type == "string":
+                        module_name = child.text.decode("utf-8").strip('\'"')
+                        imports.append(module_name)
+
+        for child in node.children:
+            walk(child)
+
+    walk(root)
+    # Deduplicate and filter out relative imports (for now)
+    return list(set(imports))
+
+
 def index_file(file_path: str) -> list[dict]:
     """Parse a file and return a list of symbol descriptors.
 

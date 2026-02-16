@@ -16,7 +16,7 @@ logger.info(f"Python version: {sys.version.split()[0]}")
 # Use absolute imports so the script works both as `python main.py` and `python -m src.server.main`
 sys.path.insert(0, os.path.dirname(__file__))
 from database import ShadowDB  # noqa: E402
-from indexer import index_file as do_index_file  # noqa: E402
+from indexer import index_file as do_index_file, extract_imports  # noqa: E402
 from drift import check_drift as do_check_drift  # noqa: E402
 from serializer import serialize_database  # noqa: E402
 
@@ -37,6 +37,8 @@ def index_file(file_path: str) -> str:
     Parses the file using tree-sitter, identifies all top-level functions and classes,
     computes stable AST hashes (ignoring whitespace), and stores them as CODE_BLOCK
     nodes with anchors in the database.
+
+    Also extracts import statements and creates DEPENDS_ON edges to imported modules.
 
     Args:
         file_path: Absolute path to the source file to index.
@@ -59,6 +61,24 @@ def index_file(file_path: str) -> str:
             sym["ast_hash"],
             sym["start_line"],
         )
+
+    # Extract imports and create DEPENDS_ON edges
+    try:
+        imports = extract_imports(file_path)
+        for imp in imports:
+            # Create a dependency node for the imported module
+            import_node_id = f"module:{imp}"
+            db.upsert_node(import_node_id, "CODE_BLOCK", f"External module: {imp}")
+
+            # Link each symbol in this file to the imported module
+            file_node_id = f"file:{relative_path}"
+            db.upsert_node(file_node_id, "CODE_BLOCK", f"File: {relative_path}")
+            db.add_edge(file_node_id, import_node_id, "DEPENDS_ON")
+
+        if imports:
+            logger.info(f"Extracted {len(imports)} import dependencies from {relative_path}")
+    except Exception as e:
+        logger.warning(f"Failed to extract imports from {file_path}: {e}")
 
     return json.dumps(
         {
