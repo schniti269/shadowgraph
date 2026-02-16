@@ -1,8 +1,9 @@
 CREATE TABLE IF NOT EXISTS nodes (
     id TEXT PRIMARY KEY,
-    type TEXT NOT NULL CHECK(type IN ('CODE_BLOCK', 'THOUGHT', 'REQUIREMENT')),
+    type TEXT NOT NULL CHECK(type IN ('CODE_BLOCK', 'THOUGHT', 'REQUIREMENT', 'CONSTRAINT', 'FOLDER')),
     content TEXT,
     vector BLOB,
+    path TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -30,3 +31,5 @@ CREATE INDEX IF NOT EXISTS idx_anchors_file ON anchors(file_path);
 CREATE INDEX IF NOT EXISTS idx_anchors_symbol ON anchors(file_path, symbol_name);
 CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
+CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
+CREATE INDEX IF NOT EXISTS idx_nodes_path ON nodes(path);

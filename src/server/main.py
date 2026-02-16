@@ -559,6 +559,435 @@ def validate_constraints(file_path: str) -> str:
         return json.dumps({"status": "error", "message": str(e)})
 
 
+# ============================================================================
+# PHASE 4: Agent Empowerment Tools
+# ============================================================================
+
+@mcp.tool()
+def create_folder(path: str, name: str, description: str = None) -> str:
+    """Create a new folder and register it in the graph as a FOLDER node.
+
+    Args:
+        path: Folder path (e.g., 'src/auth/', 'lib/utils/')
+        name: Display name for the folder
+        description: Optional description of the folder's purpose
+
+    Returns:
+        JSON with folder_node_id, created_at, verified_node (proof of persistence)
+    """
+    logger.debug(f"create_folder() called for {path}")
+
+    try:
+        # Create directory
+        import os
+        os.makedirs(path, exist_ok=True)
+        logger.info(f"Directory created: {path}")
+
+        # Create FOLDER node in graph
+        folder_id = f"folder:{path}"
+        db.create_folder(folder_id, path, description or name)
+
+        # Verify persistence
+        verified = db.verify_node(folder_id)
+        created_at = datetime.datetime.utcnow().isoformat()
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "folder_node_id": folder_id,
+                "path": path,
+                "name": name,
+                "created_at": created_at,
+                "verified_node": verified,
+                "message": f"Folder '{path}' created and registered in graph"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to create folder: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool()
+def create_file(path: str, content: str, language: str = "python", description: str = None) -> str:
+    """Create a new file and register it as a CODE_BLOCK node, optionally indexing it.
+
+    Args:
+        path: File path (e.g., 'src/auth/token.py')
+        content: File content
+        language: Programming language (python, typescript, javascript, etc.)
+        description: Optional semantic description
+
+    Returns:
+        JSON with code_node_id, created_at, verified_node, and next steps
+    """
+    logger.debug(f"create_file() called for {path}")
+
+    try:
+        import os
+
+        # Check file doesn't exist
+        if os.path.exists(path):
+            return json.dumps({"status": "error", "message": f"File already exists: {path}"})
+
+        # Create parent directories
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+
+        # Write file (atomic: write to temp, move to target)
+        temp_path = path + ".tmp"
+        try:
+            with open(temp_path, "w") as f:
+                f.write(content)
+            os.rename(temp_path, path)
+            logger.info(f"File created: {path}")
+        except Exception as e:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            raise e
+
+        # Create CODE_BLOCK node
+        code_node_id = f"code:{path}"
+        db.upsert_node(code_node_id, "CODE_BLOCK", content[:500], path)
+
+        # Auto-index if language is supported
+        supported_languages = {"python", "typescript", "javascript", "jsx", "tsx"}
+        indexed = False
+        if language.lower() in supported_languages:
+            try:
+                index_result = index_file(path)
+                result_data = json.loads(index_result)
+                indexed = result_data.get("status") == "ok"
+                logger.info(f"Auto-indexed file: {path}")
+            except Exception as e:
+                logger.warning(f"Auto-indexing failed for {path}: {e}")
+
+        # Verify persistence
+        verified = db.verify_node(code_node_id)
+        created_at = datetime.datetime.utcnow().isoformat()
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "code_node_id": code_node_id,
+                "path": path,
+                "language": language,
+                "created_at": created_at,
+                "auto_indexed": indexed,
+                "verified_node": verified,
+                "message": f"File '{path}' created and registered in graph" + (" (auto-indexed)" if indexed else ""),
+                "next_steps": [
+                    "File created and CODE_BLOCK node created" if indexed else "Call index_file() to anchor with AST hash"
+                ]
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to create file: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool()
+def move_file(old_path: str, new_path: str) -> str:
+    """Move a file and update its graph node.
+
+    Args:
+        old_path: Current file path
+        new_path: New file path
+
+    Returns:
+        JSON with updated code_node_id and verified_node
+    """
+    logger.debug(f"move_file() called: {old_path} -> {new_path}")
+
+    try:
+        import os
+        import shutil
+
+        # Move file
+        if not os.path.exists(old_path):
+            return json.dumps({"status": "error", "message": f"File not found: {old_path}"})
+
+        os.makedirs(os.path.dirname(new_path) or ".", exist_ok=True)
+        shutil.move(old_path, new_path)
+        logger.info(f"File moved: {old_path} -> {new_path}")
+
+        # Update CODE_BLOCK node path
+        old_node_id = f"code:{old_path}"
+        new_node_id = f"code:{new_path}"
+
+        old_node = db.get_node(old_node_id)
+        if old_node:
+            # Copy node to new ID and delete old
+            db.upsert_node(new_node_id, old_node["type"], old_node["content"], new_path)
+            # Note: We don't delete old_node since we want to preserve history
+
+        # Verify persistence
+        verified = db.verify_node(new_node_id)
+        return json.dumps(
+            {
+                "status": "ok",
+                "old_node_id": old_node_id,
+                "new_node_id": new_node_id,
+                "new_path": new_path,
+                "verified_node": verified,
+                "message": f"File moved and graph updated"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to move file: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool()
+def explain_code(symbol_name: str, include_thoughts: bool = True) -> str:
+    """Get a compressed explanation of code: symbol definition + all thoughts + dependencies.
+
+    Returns narrative explanation under 2000 tokens for agent context.
+
+    Args:
+        symbol_name: Prefixed symbol name (e.g., 'function:process_payment', 'class:AuthService')
+        include_thoughts: Include linked thoughts in explanation
+
+    Returns:
+        JSON with narrative explanation, dependencies, and thoughts
+    """
+    logger.debug(f"explain_code() called for {symbol_name}")
+
+    try:
+        # Get the code block node
+        code_node = db.get_node(symbol_name)
+        if not code_node:
+            return json.dumps({"status": "error", "message": f"Symbol not found: {symbol_name}"})
+
+        explanation = f"**{symbol_name}**\n\n"
+
+        # Add code snippet
+        if code_node.get("content"):
+            explanation += f"```\n{code_node['content'][:300]}\n```\n\n"
+
+        # Add linked thoughts
+        if include_thoughts:
+            explanation += "**Linked Thoughts:**\n"
+            thoughts_cursor = db.conn.execute(
+                """
+                SELECT n.id, n.content FROM nodes n
+                JOIN edges e ON e.target_id = n.id
+                WHERE e.source_id = ? AND n.type = 'THOUGHT'
+                ORDER BY n.created_at DESC
+                """,
+                (symbol_name,),
+            )
+            thoughts = thoughts_cursor.fetchall()
+            if thoughts:
+                for thought in thoughts:
+                    explanation += f"- {thought[1]}\n"
+            else:
+                explanation += "- (no linked thoughts)\n"
+
+        # Add dependencies
+        explanation += "\n**Dependencies:**\n"
+        deps_cursor = db.conn.execute(
+            """
+            SELECT target_id, relation FROM edges
+            WHERE source_id = ? AND relation IN ('DEPENDS_ON', 'REQUIRES_EDGE')
+            """,
+            (symbol_name,),
+        )
+        deps = deps_cursor.fetchall()
+        if deps:
+            for dep in deps:
+                explanation += f"- {dep[0]} ({dep[1]})\n"
+        else:
+            explanation += "- (no dependencies)\n"
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "symbol": symbol_name,
+                "explanation": explanation,
+                "token_estimate": len(explanation.split()),
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to explain code: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool()
+def suggest_refactoring(symbol_name: str) -> str:
+    """Suggest refactorings based on constraint violations and code structure.
+
+    Args:
+        symbol_name: Prefixed symbol name
+
+    Returns:
+        JSON with refactoring suggestions
+    """
+    logger.debug(f"suggest_refactoring() called for {symbol_name}")
+
+    try:
+        validator = ConstraintValidator(db)
+        code_node = db.get_node(symbol_name)
+
+        if not code_node:
+            return json.dumps({"status": "error", "message": f"Symbol not found: {symbol_name}"})
+
+        suggestions = []
+
+        # Check for constraint violations on this symbol
+        violations_cursor = db.conn.execute(
+            """
+            SELECT c.id, c.content FROM nodes c
+            JOIN edges e ON e.source_id = c.id
+            WHERE e.target_id = ? AND c.type = 'CONSTRAINT'
+            """,
+            (symbol_name,),
+        )
+        violations = violations_cursor.fetchall()
+
+        for violation in violations:
+            suggestions.append(
+                {
+                    "type": "constraint_violation",
+                    "constraint": violation[1],
+                    "recommendation": f"Refactor to satisfy constraint: {violation[1]}"
+                }
+            )
+
+        # Check for excessive dependencies
+        deps_cursor = db.conn.execute(
+            """
+            SELECT COUNT(*) FROM edges WHERE source_id = ? AND relation = 'DEPENDS_ON'
+            """,
+            (symbol_name,),
+        )
+        dep_count = deps_cursor.fetchone()[0]
+
+        if dep_count > 5:
+            suggestions.append(
+                {
+                    "type": "high_coupling",
+                    "dependencies": dep_count,
+                    "recommendation": "Consider breaking this symbol into smaller units (too many dependencies)"
+                }
+            )
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "symbol": symbol_name,
+                "total_suggestions": len(suggestions),
+                "suggestions": suggestions
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to suggest refactoring: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool()
+def generate_tests(symbol_name: str, test_dir: str = "tests") -> str:
+    """Generate a test stub file for a given symbol.
+
+    Args:
+        symbol_name: Prefixed symbol name (e.g., 'function:process_payment')
+        test_dir: Directory to create test file in
+
+    Returns:
+        JSON with test_file_path and test stub content
+    """
+    logger.debug(f"generate_tests() called for {symbol_name}")
+
+    try:
+        import os
+
+        code_node = db.get_node(symbol_name)
+        if not code_node:
+            return json.dumps({"status": "error", "message": f"Symbol not found: {symbol_name}"})
+
+        # Parse symbol name
+        parts = symbol_name.split(":")
+        symbol_type = parts[0]  # function, class, etc.
+        symbol_func = parts[1] if len(parts) > 1 else "unknown"
+
+        # Determine test language based on source file
+        source_file = code_node.get("path", "unknown")
+        if source_file.endswith(".py"):
+            test_ext = ".py"
+            test_content = f'''import pytest
+from {source_file.replace('/', '.').replace('.py', '')} import {symbol_func}
+
+
+def test_{symbol_func}_basic():
+    """Test basic functionality of {symbol_func}."""
+    # TODO: Implement test
+    pass
+
+
+def test_{symbol_func}_edge_cases():
+    """Test edge cases for {symbol_func}."""
+    # TODO: Implement test
+    pass
+
+
+def test_{symbol_func}_error_handling():
+    """Test error handling in {symbol_func}."""
+    # TODO: Implement test
+    pass
+'''
+        else:
+            test_ext = ".ts"
+            test_content = f'''import {{ {symbol_func} }} from '{source_file.replace('.ts', '').replace('.js', '')}'
+
+describe('{symbol_func}', () => {{
+    it('should perform basic operation', () => {{
+        // TODO: Implement test
+    }})
+
+    it('should handle edge cases', () => {{
+        // TODO: Implement test
+    }})
+
+    it('should handle errors', () => {{
+        // TODO: Implement test
+    }})
+}})
+'''
+
+        os.makedirs(test_dir, exist_ok=True)
+        test_file = f"{test_dir}/test_{symbol_func}{test_ext}"
+
+        # Avoid overwriting existing tests
+        if os.path.exists(test_file):
+            return json.dumps(
+                {
+                    "status": "ok",
+                    "symbol": symbol_name,
+                    "test_file": test_file,
+                    "message": "Test file already exists",
+                    "content": test_content,
+                }
+            )
+
+        # Write test file
+        with open(test_file, "w") as f:
+            f.write(test_content)
+
+        logger.info(f"Test stub created: {test_file}")
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "symbol": symbol_name,
+                "test_file": test_file,
+                "test_cases": 3,
+                "content": test_content,
+                "message": f"Test stub created at {test_file}. Fill in the TODOs!"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to generate tests: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
 # Entry point
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--cli":

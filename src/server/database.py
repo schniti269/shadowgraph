@@ -17,10 +17,10 @@ class ShadowDB:
         schema_path = Path(__file__).parent / "schema.sql"
         self.conn.executescript(schema_path.read_text())
 
-    def upsert_node(self, node_id: str, node_type: str, content: str) -> None:
+    def upsert_node(self, node_id: str, node_type: str, content: str, path: str = None) -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO nodes (id, type, content) VALUES (?, ?, ?)",
-            (node_id, node_type, content),
+            "INSERT OR REPLACE INTO nodes (id, type, content, path) VALUES (?, ?, ?, ?)",
+            (node_id, node_type, content, path),
         )
         self.conn.commit()
 
@@ -91,6 +91,55 @@ class ShadowDB:
         )
         row = cursor.fetchone()
         return dict(row) if row else None
+
+    def verify_node(self, node_id: str) -> dict | None:
+        """Verify a node exists in DB by querying it back (proof of persistence)."""
+        cursor = self.conn.execute(
+            "SELECT * FROM nodes WHERE id = ?", (node_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def create_folder(self, folder_id: str, path: str, description: str = None) -> None:
+        """Create a FOLDER node to represent a module/package."""
+        self.upsert_node(folder_id, "FOLDER", description or "", path)
+
+    def get_folder(self, path: str) -> dict | None:
+        """Get folder node by path."""
+        cursor = self.conn.execute(
+            "SELECT * FROM nodes WHERE type = 'FOLDER' AND path = ?", (path,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def list_folder_contents(self, folder_path: str) -> list[dict]:
+        """Get all CODE_BLOCK nodes under a folder path."""
+        # Normalize path to end with /
+        if not folder_path.endswith('/'):
+            folder_path += '/'
+
+        cursor = self.conn.execute(
+            """
+            SELECT * FROM nodes
+            WHERE type = 'CODE_BLOCK' AND path LIKE ?
+            ORDER BY path
+            """,
+            (folder_path + '%',),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_folder_thoughts(self, folder_path: str) -> list[dict]:
+        """Get all thoughts attached to a folder."""
+        cursor = self.conn.execute(
+            """
+            SELECT n.id, n.content, n.created_at FROM nodes n
+            JOIN edges e ON e.target_id = n.id
+            WHERE e.source_id LIKE ? AND n.type = 'THOUGHT'
+            ORDER BY n.created_at DESC
+            """,
+            (f"folder:{folder_path}%",),
+        )
+        return [dict(row) for row in cursor.fetchall()]
 
     def close(self) -> None:
         if self.conn:
