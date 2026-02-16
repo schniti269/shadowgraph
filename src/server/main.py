@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from database import ShadowDB  # noqa: E402
 from indexer import index_file as do_index_file  # noqa: E402
 from drift import check_drift as do_check_drift  # noqa: E402
+from serializer import serialize_database  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
@@ -210,6 +211,162 @@ def edit_code_with_thought(
     )
 
 
+@mcp.tool()
+def query_blast_radius(symbol_name: str, depth: int = 2) -> str:
+    """Query the blast radius of a symbol: what could break if I change this?
+
+    Recursively retrieves:
+    1. Dependencies (outgoing): What does this symbol depend on? What breaks if those change?
+    2. Dependents (incoming): Who depends on me? What breaks if I change?
+    3. Constraints: What rules apply to this symbol?
+    4. Thoughts: What developer notes are attached?
+
+    This is the primary tool for agents to understand impact before making changes.
+
+    Args:
+        symbol_name: Symbol identifier, e.g., "function:charge" or "class:PaymentService".
+        depth: How many hops to follow (default 2). Higher depth = broader context.
+
+    Returns:
+        JSON with blast radius graph including dependencies, dependents, constraints, and thoughts.
+    """
+    logger.debug(f"query_blast_radius() called for {symbol_name} at depth {depth}")
+
+    # Query database using recursive approach
+    conn = db.conn
+    conn.row_factory = None  # Use tuple rows for recursive query
+
+    # Recursive CTE to find all reachable nodes (up to depth hops)
+    query = """
+    WITH RECURSIVE blast(node_id, distance, direction) AS (
+        -- Start: find the target node by symbol_name pattern
+        SELECT n.id, 0, 'root'
+        FROM nodes n
+        WHERE n.id LIKE ?
+
+        UNION ALL
+
+        -- Outgoing: what does this depend on?
+        SELECT e.target_id, b.distance + 1, 'depends_on'
+        FROM blast b
+        JOIN edges e ON e.source_id = b.node_id
+        WHERE b.distance < ? AND e.relation IN ('DEPENDS_ON', 'HAS_THOUGHT')
+
+        UNION ALL
+
+        -- Incoming: who depends on this?
+        SELECT e.source_id, b.distance + 1, 'depended_by'
+        FROM blast b
+        JOIN edges e ON e.target_id = b.node_id
+        WHERE b.distance < ? AND e.relation IN ('DEPENDS_ON', 'REQUIRED_BY')
+    )
+    SELECT DISTINCT b.node_id, b.distance, b.direction, n.type, n.content
+    FROM blast b
+    JOIN nodes n ON n.id = b.node_id
+    ORDER BY b.distance, b.direction, b.node_id
+    """
+
+    # Find root node by symbol name pattern
+    pattern = f"%:{symbol_name}" if ":" not in symbol_name else f"%{symbol_name}%"
+
+    cursor = conn.execute(query, (pattern, depth, depth))
+    results = cursor.fetchall()
+
+    # Format results
+    dependencies = []
+    dependents = []
+    root_thoughts = []
+
+    for node_id, distance, direction, node_type, content in results:
+        if distance == 0:
+            # This is the root node we're analyzing
+            root_node = {
+                "id": node_id,
+                "type": node_type,
+                "content": content[:200] if content else None,  # Snippet
+            }
+        elif direction == "depends_on" and node_type != "THOUGHT":
+            dependencies.append({
+                "id": node_id,
+                "type": node_type,
+                "distance": distance,
+                "content": content[:100] if content else None,
+            })
+        elif direction == "depends_on" and node_type == "THOUGHT":
+            root_thoughts.append({
+                "id": node_id,
+                "text": content,
+            })
+        elif direction in ("depended_by", "root") and node_type != "THOUGHT":
+            dependents.append({
+                "id": node_id,
+                "type": node_type,
+                "distance": distance,
+                "content": content[:100] if content else None,
+            })
+
+    logger.info(f"Blast radius for {symbol_name}: {len(dependencies)} deps, {len(dependents)} dependents")
+
+    return json.dumps(
+        {
+            "symbol": symbol_name,
+            "depth": depth,
+            "root": root_node if results else None,
+            "dependencies": dependencies,
+            "dependents": dependents,
+            "thoughts": root_thoughts,
+            "summary": f"Found {len(dependencies)} dependencies, {len(dependents)} dependents at depth {depth}",
+        }
+    )
+
+
+@mcp.tool()
+def serialize_graph(output_path: str = ".shadow/graph.jsonl") -> str:
+    """Export the semantic graph to JSONL format for git tracking.
+
+    Creates a `.shadow/graph.jsonl` file with all nodes, anchors, and edges
+    in JSONL format (one JSON object per line). This file is designed to be:
+    - Diffable (line-based diffs)
+    - Mergeable (timestamps prevent conflicts)
+    - Git-trackable (human readable)
+    - Loadable back into the database via deserialize_graph()
+
+    Args:
+        output_path: Where to write the JSONL file (default: .shadow/graph.jsonl).
+
+    Returns:
+        JSON confirmation with file size and item counts.
+    """
+    logger.debug(f"serialize_graph() called, output to {output_path}")
+
+    # Create .shadow directory if needed
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    serialize_database(db_path, output_path)
+
+    # Count items
+    conn = db.conn
+    node_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    anchor_count = conn.execute("SELECT COUNT(*) FROM anchors").fetchone()[0]
+    edge_count = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+
+    file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+
+    logger.info(f"Graph serialized to {output_path}: {node_count} nodes, {anchor_count} anchors, {edge_count} edges")
+
+    return json.dumps(
+        {
+            "status": "ok",
+            "output_path": output_path,
+            "file_size_bytes": file_size,
+            "nodes": node_count,
+            "anchors": anchor_count,
+            "edges": edge_count,
+            "message": f"Graph exported. Commit {output_path} to git to share with your team.",
+        }
+    )
+
+
 # Entry point
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--cli":
@@ -223,6 +380,10 @@ if __name__ == "__main__":
             print(result)
         elif command == "check_drift" and len(sys.argv) > 3:
             result = check_drift(sys.argv[3])
+            print(result)
+        elif command == "serialize_graph":
+            output = sys.argv[3] if len(sys.argv) > 3 else ".shadow/graph.jsonl"
+            result = serialize_graph(output)
             print(result)
         else:
             print(json.dumps({"error": f"Unknown command or missing args: {command}"}))
