@@ -1,13 +1,41 @@
 {
     "name": "shadowgraph",
     "displayName": "ShadowGraph",
-    "description": "A semantic shadow layer for codebases — link thoughts, requirements, and notes to code symbols via AST anchoring.",
-    "version": "0.1.0",
+    "description": "Semantic intent preservation for code. Link thoughts, constraints, and architectural decisions to code symbols via stable AST anchors. Team collaboration through git-tracked graphs.",
+    "version": "0.3.0",
     "publisher": "shadowgraph",
+    "author": "ShadowGraph Contributors",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/yourusername/shadowgraph"
+    },
+    "bugs": {
+        "url": "https://github.com/yourusername/shadowgraph/issues"
+    },
+    "homepage": "https://github.com/yourusername/shadowgraph#readme",
+    "keywords": [
+        "semantic",
+        "ai-agents",
+        "debugging",
+        "collaboration",
+        "intent-preservation",
+        "code-intelligence",
+        "ast",
+        "graph-database",
+        "team-context",
+        "blast-radius"
+    ],
+    "icon": "icons/thought.svg",
+    "galleryBanner": {
+        "color": "#2c3e50",
+        "theme": "dark"
+    },
     "engines": {
         "vscode": "^1.96.0"
     },
     "categories": [
+        "Programming Languages",
         "Other",
         "AI"
     ],
@@ -50,6 +78,10 @@
             {
                 "command": "shadowgraph.runDiagnostics",
                 "title": "ShadowGraph: Run Diagnostics"
+            },
+            {
+                "command": "shadowgraph.analyzeBlastRadius",
+                "title": "ShadowGraph: Analyze Blast Radius"
             }
         ],
         "configuration": {
@@ -74,6 +106,11 @@
                     "type": "boolean",
                     "default": false,
                     "description": "Automatically index files on save."
+                },
+                "shadowgraph.enableGitIntegration": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Auto-load graph from .shadow/graph.jsonl on pull."
                 }
             }
         }

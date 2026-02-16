@@ -1,12 +1,41 @@
+# Build files
 .vscode/**
-src/client/**
-src/test/**
 node_modules/**
+dist/**/*.map
 **/*.ts
 !src/server/**
+
+# Source files (only ship compiled Python)
+src/client/**
+src/test/**
 tsconfig.json
 esbuild.js
+
+# Config files
 pyproject.toml
 .gitignore
-**/*.map
+.github/**
+.claude/**
+
+# Documentation
+docs/**
+*.md
+CONTRIBUTING.md
+CHANGELOG.md
+README.md
+PHASE2_STATUS.md
+
+# Development files
 InfosOnVsCodeExtenions.txt
+.shadow/**
+.vscode/shadow.db*
+
+# CI/CD
+.github/workflows/**
+
+# Testing
+src/test/**
+pytest.ini
+.pytest_cache/**
+__pycache__/**
+*.pyc

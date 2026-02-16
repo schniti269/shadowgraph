@@ -1,0 +1,8 @@
+# Ignore local database files (regenerated from graph.jsonl)
+*.db
+*.db-wal
+*.db-shm
+
+# Track the serialized graph (JSONL format)
+!graph.jsonl
+!.gitkeep
