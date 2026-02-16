@@ -86,11 +86,13 @@ export class ShadowDatabase {
     }
 
     reload(): void {
+        console.log('[ShadowGraph Database] Reloading database from disk');
         if (this.db) {
             this.db.close();
             this.db = null;
         }
         this.loadFromDisk();
+        console.log('[ShadowGraph Database] Database reload complete');
     }
 
     getThoughtsForSymbol(

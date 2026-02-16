@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import uuid
 from pathlib import Path
 
 
@@ -23,6 +24,13 @@ class ShadowDB:
 
     def _apply_migrations(self) -> None:
         """Apply schema migrations for existing databases."""
+        # Check if nodes table exists (skip migrations for fresh DB)
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='nodes'"
+        )
+        if not cursor.fetchone():
+            return  # Fresh database, no migrations needed
+
         cursor = self.conn.execute("PRAGMA table_info(nodes)")
         columns = {row[1] for row in cursor.fetchall()}
 
@@ -33,6 +41,53 @@ class ShadowDB:
                 self.conn.commit()
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+        # Fix CHECK constraint to include FOLDER and CONSTRAINT types
+        # Old DBs reject FOLDER inserts. Recreate the table with updated constraint.
+        try:
+            # Check if a FOLDER insert would fail
+            self.conn.execute(
+                "INSERT INTO nodes (id, type, content) VALUES (?, ?, ?) "
+                "ON CONFLICT DO NOTHING",
+                (f"_migration_test_{uuid.uuid4().hex[:8]}", "FOLDER", "test")
+            )
+            self.conn.execute(
+                "DELETE FROM nodes WHERE id LIKE '_migration_test%'"
+            )
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            # CHECK constraint failed — need to recreate table
+            # Backup existing data, recreate with new constraint, restore
+            self.conn.execute("PRAGMA foreign_keys=OFF")
+
+            # Copy existing data to temp table
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS nodes_backup (
+                    id TEXT PRIMARY KEY,
+                    type TEXT NOT NULL,
+                    content TEXT,
+                    vector BLOB,
+                    path TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            self.conn.execute("INSERT INTO nodes_backup SELECT * FROM nodes")
+
+            # Drop old table (will cascade delete anchors due to FK)
+            self.conn.execute("DROP TABLE nodes")
+
+            # Recreate with fixed CHECK constraint (includes FOLDER, CONSTRAINT)
+            self.conn.executescript(Path(__file__).parent.joinpath("schema.sql").read_text())
+
+            # Restore data
+            self.conn.execute("""
+                INSERT INTO nodes (id, type, content, vector, path, created_at)
+                SELECT id, type, content, vector, path, created_at FROM nodes_backup
+            """)
+            self.conn.execute("DROP TABLE nodes_backup")
+
+            self.conn.execute("PRAGMA foreign_keys=ON")
+            self.conn.commit()
 
         # Add indexes if they don't exist (safe due to IF NOT EXISTS)
         indexes = [

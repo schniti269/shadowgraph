@@ -49,7 +49,7 @@ def index_file(file_path: str) -> str:
     """
     logger.debug(f"index_file() called with: {file_path}")
     symbols = do_index_file(file_path)
-    relative_path = os.path.relpath(file_path)
+    relative_path = os.path.relpath(file_path).replace("\\", "/")
     logger.info(f"Indexed {len(symbols)} symbols from {relative_path}")
 
     for sym in symbols:
@@ -108,13 +108,24 @@ def add_thought(file_path: str, symbol_name: str, thought_text: str) -> str:
         JSON confirmation with the thought ID and timestamp.
     """
     logger.debug(f"add_thought() called for {file_path}:{symbol_name}")
-    code_node_id = f"code:{file_path}:{symbol_name}"
+    # Normalize path to forward slashes (like index_file does)
+    normalized_path = file_path.replace("\\", "/")
+    code_node_id = f"code:{normalized_path}:{symbol_name}"
     thought_id = f"thought:{uuid.uuid4().hex[:12]}"
     created_at = datetime.datetime.utcnow().isoformat()
 
     db.upsert_node(thought_id, "THOUGHT", thought_text)
-    db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
-    logger.info(f"Thought created: {thought_id} for {code_node_id}")
+    try:
+        db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
+        logger.info(f"Thought created: {thought_id} for {code_node_id}")
+    except Exception as e:
+        if "FOREIGN KEY" in str(e):
+            logger.error(f"Code node not found: {code_node_id}. Index the file first.")
+            return json.dumps({
+                "status": "error",
+                "message": f"Code node not found: {code_node_id}. File must be indexed before adding thoughts."
+            })
+        raise
 
     return json.dumps(
         {
@@ -208,13 +219,21 @@ def edit_code_with_thought(
         JSON confirmation with thought ID. You may now edit the code.
     """
     logger.debug(f"edit_code_with_thought() called for {file_path}:{symbol_name}")
-    code_node_id = f"code:{file_path}:{symbol_name}"
+    # Normalize path to forward slashes (like index_file does)
+    normalized_path = file_path.replace("\\", "/")
+    code_node_id = f"code:{normalized_path}:{symbol_name}"
     thought_id = f"thought:{uuid.uuid4().hex[:12]}"
     created_at = datetime.datetime.utcnow().isoformat()
 
     db.upsert_node(thought_id, "THOUGHT", thought_text)
-    db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
-    logger.info(f"Edit thought created: {thought_id} for {code_node_id}")
+    try:
+        db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
+        logger.info(f"Edit thought created: {thought_id} for {code_node_id}")
+    except Exception as e:
+        if "FOREIGN KEY" in str(e):
+            logger.warning(f"Code node not found: {code_node_id}. Will create thought anyway (node may not be indexed yet).")
+        else:
+            raise
 
     return json.dumps(
         {
@@ -652,24 +671,42 @@ def create_file(path: str, content: str, language: str = "python", description: 
                 os.remove(temp_path)
             raise e
 
-        # Create CODE_BLOCK node
-        code_node_id = f"code:{path}"
-        db.upsert_node(code_node_id, "CODE_BLOCK", content[:500], path)
-
-        # Auto-index if language is supported
+        # Auto-index if language is supported to create symbol nodes with anchors
         supported_languages = {"python", "typescript", "javascript", "jsx", "tsx"}
         indexed = False
+        symbols_indexed = 0
+        symbols = []
         if language.lower() in supported_languages:
             try:
                 index_result = index_file(path)
                 result_data = json.loads(index_result)
                 indexed = result_data.get("status") == "ok"
-                logger.info(f"Auto-indexed file: {path}")
+                symbols_indexed = result_data.get("symbols_indexed", 0)
+                symbols = result_data.get("symbols", [])
+                logger.info(f"Auto-indexed file: {path} with {symbols_indexed} symbols")
             except Exception as e:
                 logger.warning(f"Auto-indexing failed for {path}: {e}")
 
-        # Verify persistence
-        verified = db.verify_node(code_node_id)
+        # Normalize path for node IDs (use forward slashes like index_file does)
+        normalized_path = path.replace("\\", "/")
+
+        # Verify persistence: check indexed symbols or file-level node
+        verified = None
+        code_node_id = f"code:{normalized_path}"  # Default file-level node ID
+
+        if symbols_indexed > 0 and symbols:
+            # If we indexed symbols, verify the first one (which proves the file was indexed)
+            first_symbol = symbols[0]
+            verified_node_id = f"code:{normalized_path}:{first_symbol}"
+            verified = db.verify_node(verified_node_id)
+            code_node_id = verified_node_id
+            logger.debug(f"Verifying indexed symbol: {verified_node_id}")
+        else:
+            # If no symbols (empty file or unsupported language), create and verify file-level node
+            db.upsert_node(code_node_id, "CODE_BLOCK", content[:500], normalized_path)
+            verified = db.verify_node(code_node_id)
+            logger.debug(f"Created file-level node: {code_node_id}")
+
         created_at = datetime.datetime.utcnow().isoformat()
 
         return json.dumps(
@@ -680,10 +717,11 @@ def create_file(path: str, content: str, language: str = "python", description: 
                 "language": language,
                 "created_at": created_at,
                 "auto_indexed": indexed,
+                "symbols_indexed": symbols_indexed,
                 "verified_node": verified,
-                "message": f"File '{path}' created and registered in graph" + (" (auto-indexed)" if indexed else ""),
+                "message": f"File '{path}' created and registered in graph" + (f" (auto-indexed {symbols_indexed} symbols)" if indexed and symbols_indexed > 0 else ""),
                 "next_steps": [
-                    "File created and CODE_BLOCK node created" if indexed else "Call index_file() to anchor with AST hash"
+                    "Symbols are indexed and anchored" if symbols_indexed > 0 else "File created (no symbols found or unsupported language)"
                 ]
             }
         )
