@@ -19,6 +19,7 @@ from database import ShadowDB  # noqa: E402
 from indexer import index_file as do_index_file, extract_imports  # noqa: E402
 from drift import check_drift as do_check_drift  # noqa: E402
 from serializer import serialize_database  # noqa: E402
+from constraints import ConstraintValidator  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
@@ -385,6 +386,98 @@ def serialize_graph(output_path: str = ".shadow/graph.jsonl") -> str:
             "message": f"Graph exported. Commit {output_path} to git to share with your team.",
         }
     )
+
+
+@mcp.tool()
+def add_constraint(
+    file_path: str,
+    symbol_name: str,
+    rule_text: str,
+    constraint_type: str = "RULE",
+    severity: str = "warning",
+) -> str:
+    """Add a semantic constraint to a symbol.
+
+    Constraints are rules that code must follow:
+    - RULE: General requirement (e.g., "Payments must be idempotent")
+    - FORBIDDEN: Patterns to avoid (e.g., "Do not use Math.random()")
+    - REQUIRED_PATTERN: Code must match pattern
+    - REQUIRES_EDGE: Relationship required
+
+    Args:
+        file_path: Relative path to the source file.
+        symbol_name: Symbol to constrain (e.g., "function:charge").
+        rule_text: The constraint description.
+        constraint_type: Type: RULE, FORBIDDEN, REQUIRED_PATTERN, REQUIRES_EDGE.
+        severity: warning, error, critical.
+
+    Returns:
+        JSON confirmation with constraint ID.
+    """
+    logger.debug(f"add_constraint() called for {file_path}:{symbol_name}")
+    validator = ConstraintValidator(db)
+
+    try:
+        constraint_id = validator.add_constraint(
+            symbol_name, file_path, rule_text, constraint_type, severity
+        )
+        logger.info(f"Constraint added: {constraint_id}")
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "constraint_id": constraint_id,
+                "symbol": symbol_name,
+                "severity": severity,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to add constraint: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool()
+def validate_constraints(file_path: str) -> str:
+    """Validate all symbols in a file against their constraints.
+
+    Returns violations grouped by severity.
+
+    Args:
+        file_path: Relative path to the source file to validate.
+
+    Returns:
+        JSON with violation list and summary.
+    """
+    logger.debug(f"validate_constraints() called for {file_path}")
+    validator = ConstraintValidator(db)
+
+    try:
+        violations = validator.validate_file(file_path)
+
+        # Group by severity
+        by_severity = {"critical": [], "error": [], "warning": [], "info": []}
+        for v in violations:
+            severity = v.get("severity", "info")
+            if severity in by_severity:
+                by_severity[severity].append(v)
+
+        logger.info(f"Validated {file_path}: {len(violations)} violations found")
+
+        return json.dumps(
+            {
+                "status": "ok",
+                "file": file_path,
+                "total_violations": len(violations),
+                "critical": len(by_severity["critical"]),
+                "error": len(by_severity["error"]),
+                "warning": len(by_severity["warning"]),
+                "info": len(by_severity["info"]),
+                "violations": violations,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to validate constraints: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
 
 
 # Entry point
