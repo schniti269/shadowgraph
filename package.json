@@ -3,7 +3,7 @@
     "displayName": "ShadowGraph",
     "description": "Semantic intent preservation for code. Link thoughts, constraints, and architectural decisions to code symbols via stable AST anchors. Team collaboration through git-tracked graphs.",
     "version": "0.3.0",
-    "publisher": "shadowgraph",
+    "publisher": "schniti269",
     "author": "ShadowGraph Contributors",
     "license": "MIT",
     "repository": {
