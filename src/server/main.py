@@ -603,8 +603,10 @@ def create_folder(path: str, name: str, description: str = None) -> str:
         logger.info(f"Directory created: {path}")
 
         # Create FOLDER node in graph
-        folder_id = f"folder:{path}"
-        db.create_folder(folder_id, path, description or name)
+        # Normalize path to forward slashes (like other tools do)
+        normalized_path = path.replace("\\", "/")
+        folder_id = f"folder:{normalized_path}"
+        db.create_folder(folder_id, normalized_path, description or name)
 
         # Verify persistence
         verified = db.verify_node(folder_id)
@@ -756,13 +758,16 @@ def move_file(old_path: str, new_path: str) -> str:
         logger.info(f"File moved: {old_path} -> {new_path}")
 
         # Update CODE_BLOCK node path
-        old_node_id = f"code:{old_path}"
-        new_node_id = f"code:{new_path}"
+        # Normalize paths to forward slashes (like other tools do)
+        old_normalized = old_path.replace("\\", "/")
+        new_normalized = new_path.replace("\\", "/")
+        old_node_id = f"code:{old_normalized}"
+        new_node_id = f"code:{new_normalized}"
 
         old_node = db.get_node(old_node_id)
         if old_node:
             # Copy node to new ID and delete old
-            db.upsert_node(new_node_id, old_node["type"], old_node["content"], new_path)
+            db.upsert_node(new_node_id, old_node["type"], old_node["content"], new_normalized)
             # Note: We don't delete old_node since we want to preserve history
 
         # Verify persistence
