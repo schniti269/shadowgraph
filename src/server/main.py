@@ -25,8 +25,17 @@ from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 # Initialize database
 db_path = os.environ.get("SHADOW_DB_PATH", ".vscode/shadow.db")
-db = ShadowDB(db_path)
-db.connect()
+logger.info(f"Initializing database at: {db_path}")
+logger.info(f"Absolute path: {os.path.abspath(db_path)}")
+logger.info(f"Current working directory: {os.getcwd()}")
+
+try:
+    db = ShadowDB(db_path)
+    db.connect()
+    logger.info(f"Database connected successfully")
+except Exception as e:
+    logger.error(f"CRITICAL: Failed to initialize database: {e}", exc_info=True)
+    raise
 
 mcp = FastMCP("ShadowGraph")
 
