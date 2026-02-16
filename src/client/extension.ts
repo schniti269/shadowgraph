@@ -74,12 +74,14 @@ export async function activate(context: vscode.ExtensionContext) {
                         // Arg 2: Command (string)
                         // Arg 3: Args (string[])
                         // Arg 4: Options (environment variables, etc.)
+                        // Pass db path as CLI arg since env vars may not be forwarded
+                        // by McpStdioServerDefinition on all platforms.
                         const server = new vscode.McpStdioServerDefinition(
                             'ShadowGraph Tools',  // Label
                             pythonInfo.pythonPath,  // Command
-                            [serverScript],  // Args
+                            [serverScript, '--db-path', dbPath],  // Args
                             {  // Options
-                                cwd: workspaceFolder.uri.fsPath,  // CRITICAL: Set working directory for file creation tools
+                                cwd: workspaceFolder.uri.fsPath,
                                 env: {
                                     SHADOW_DB_PATH: dbPath,
                                     PYTHONDONTWRITEBYTECODE: '1',

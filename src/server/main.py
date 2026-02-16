@@ -24,20 +24,62 @@ from constraints import ConstraintValidator  # noqa: E402
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
 # Initialize database
-db_path = os.environ.get("SHADOW_DB_PATH", ".vscode/shadow.db")
-logger.info(f"Initializing database at: {db_path}")
+# Priority: --db-path CLI arg > SHADOW_DB_PATH env var > default
+# CLI arg is used because McpStdioServerDefinition may not forward env vars on all platforms.
+_db_path_from_arg = None
+if "--db-path" in sys.argv:
+    _idx = sys.argv.index("--db-path")
+    if _idx + 1 < len(sys.argv):
+        _db_path_from_arg = sys.argv[_idx + 1]
+
+db_path = _db_path_from_arg or os.environ.get("SHADOW_DB_PATH", ".vscode/shadow.db")
+logger.info(f"Initializing database at: {db_path} (source: {'--db-path arg' if _db_path_from_arg else 'env/default'})")
 logger.info(f"Absolute path: {os.path.abspath(db_path)}")
 logger.info(f"Current working directory: {os.getcwd()}")
 
+# Derive workspace root from SHADOW_DB_PATH: it's always {workspace}/.vscode/shadow.db
+# This is the single source of truth — never rely on os.getcwd() which may be wrong.
+_abs_db_path = os.path.abspath(db_path)
+WORKSPACE_ROOT = os.path.dirname(os.path.dirname(_abs_db_path))
+logger.info(f"Workspace root (derived from SHADOW_DB_PATH): {WORKSPACE_ROOT}")
+
 try:
-    db = ShadowDB(db_path)
+    # Always use the absolute path so the DB is created in the right place
+    # regardless of what cwd the MCP server process happens to start with.
+    db = ShadowDB(_abs_db_path)
     db.connect()
-    logger.info(f"Database connected successfully")
+    logger.info(f"Database connected successfully at: {_abs_db_path}")
 except Exception as e:
     logger.error(f"CRITICAL: Failed to initialize database: {e}", exc_info=True)
     raise
 
 mcp = FastMCP("ShadowGraph")
+
+
+def _resolve_path(path: str) -> str:
+    """Resolve a path (relative or absolute) to an absolute path.
+
+    Relative paths are resolved relative to WORKSPACE_ROOT, not os.getcwd().
+    This is critical because the MCP server's cwd may not be the workspace root.
+    """
+    if os.path.isabs(path):
+        return path
+    return os.path.join(WORKSPACE_ROOT, path)
+
+
+def _to_rel_path(path: str) -> str:
+    """Convert any path to a forward-slash relative path from WORKSPACE_ROOT.
+
+    This is the canonical form stored in the DB and used for all node IDs.
+    Always use this instead of os.path.relpath() directly.
+    """
+    abs_path = _resolve_path(path)
+    try:
+        rel = os.path.relpath(abs_path, WORKSPACE_ROOT)
+    except ValueError:
+        # On Windows, relpath raises ValueError if paths are on different drives
+        rel = abs_path
+    return rel.replace("\\", "/")
 
 
 @mcp.tool()
@@ -58,7 +100,7 @@ def index_file(file_path: str) -> str:
     """
     logger.debug(f"index_file() called with: {file_path}")
     symbols = do_index_file(file_path)
-    relative_path = os.path.relpath(file_path).replace("\\", "/")
+    relative_path = _to_rel_path(file_path)
     logger.info(f"Indexed {len(symbols)} symbols from {relative_path}")
 
     for sym in symbols:
@@ -117,8 +159,7 @@ def add_thought(file_path: str, symbol_name: str, thought_text: str) -> str:
         JSON confirmation with the thought ID and timestamp.
     """
     logger.debug(f"add_thought() called for {file_path}:{symbol_name}")
-    # Normalize path to forward slashes (like index_file does)
-    normalized_path = file_path.replace("\\", "/")
+    normalized_path = _to_rel_path(file_path)
     code_node_id = f"code:{normalized_path}:{symbol_name}"
     thought_id = f"thought:{uuid.uuid4().hex[:12]}"
     created_at = datetime.datetime.utcnow().isoformat()
@@ -160,12 +201,13 @@ def get_context(file_path: str, symbol_name: str) -> str:
     Returns:
         JSON object with code content and all linked thoughts.
     """
-    code_node_id = f"code:{file_path}:{symbol_name}"
+    normalized_path = _to_rel_path(file_path)
+    code_node_id = f"code:{normalized_path}:{symbol_name}"
 
     code_node = db.get_node(code_node_id)
     code_content = code_node["content"] if code_node else None
 
-    thoughts = db.get_thoughts_for_symbol(file_path, symbol_name)
+    thoughts = db.get_thoughts_for_symbol(normalized_path, symbol_name)
 
     return json.dumps(
         {
@@ -228,8 +270,7 @@ def edit_code_with_thought(
         JSON confirmation with thought ID. You may now edit the code.
     """
     logger.debug(f"edit_code_with_thought() called for {file_path}:{symbol_name}")
-    # Normalize path to forward slashes (like index_file does)
-    normalized_path = file_path.replace("\\", "/")
+    normalized_path = _to_rel_path(file_path)
     code_node_id = f"code:{normalized_path}:{symbol_name}"
     thought_id = f"thought:{uuid.uuid4().hex[:12]}"
     created_at = datetime.datetime.utcnow().isoformat()
@@ -391,7 +432,7 @@ def serialize_graph(output_path: str = ".shadow/graph.jsonl") -> str:
     # Create .shadow directory if needed
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    serialize_database(db_path, output_path)
+    serialize_database(_abs_db_path, output_path)
 
     # Count items
     conn = db.conn
@@ -606,16 +647,19 @@ def create_folder(path: str, name: str, description: str = None) -> str:
     logger.debug(f"create_folder() called for {path}")
 
     try:
-        # Create directory
-        import os
-        os.makedirs(path, exist_ok=True)
-        logger.info(f"Directory created: {path}")
+        # Resolve to absolute path (relative paths go relative to workspace root)
+        abs_path = _resolve_path(path)
+        # Compute relative path from workspace root for DB storage
+        rel_path = _to_rel_path(abs_path)
+        logger.debug(f"Absolute path: {abs_path}, rel path (for DB): {rel_path}")
 
-        # Create FOLDER node in graph
-        # Normalize path to forward slashes (like other tools do)
-        normalized_path = path.replace("\\", "/")
-        folder_id = f"folder:{normalized_path}"
-        db.create_folder(folder_id, normalized_path, description or name)
+        # Create directory
+        os.makedirs(abs_path, exist_ok=True)
+        logger.info(f"Directory created: {abs_path}")
+
+        # Create FOLDER node in graph using relative path
+        folder_id = f"folder:{rel_path}"
+        db.create_folder(folder_id, rel_path, description or name)
 
         # Verify persistence
         verified = db.verify_node(folder_id)
@@ -625,11 +669,11 @@ def create_folder(path: str, name: str, description: str = None) -> str:
             {
                 "status": "ok",
                 "folder_node_id": folder_id,
-                "path": path,
+                "path": rel_path,
                 "name": name,
                 "created_at": created_at,
                 "verified_node": verified,
-                "message": f"Folder '{path}' created and registered in graph"
+                "message": f"Folder '{rel_path}' created and registered in graph"
             }
         )
     except Exception as e:
@@ -652,30 +696,36 @@ def create_file(path: str, content: str, language: str = "python", description: 
     """
     logger.debug(f"create_file() called for {path}")
     logger.debug(f"Current working directory: {os.getcwd()}")
-    logger.debug(f"Absolute path will be: {os.path.abspath(path)}")
+
+    # Resolve to absolute path (relative paths go relative to workspace root)
+    abs_path = _resolve_path(path)
+    # Compute relative path from workspace root — this is what gets stored in the DB
+    rel_path = _to_rel_path(abs_path)
+    logger.debug(f"Absolute path: {abs_path}")
+    logger.debug(f"Relative path (for DB): {rel_path}")
 
     try:
         # Check file doesn't exist
-        if os.path.exists(path):
-            logger.warning(f"File already exists: {path}")
+        if os.path.exists(abs_path):
+            logger.warning(f"File already exists: {abs_path}")
             return json.dumps({"status": "error", "message": f"File already exists: {path}"})
 
         # Create parent directories
-        parent_dir = os.path.dirname(path) or "."
+        parent_dir = os.path.dirname(abs_path)
         logger.debug(f"Creating parent directory: {parent_dir}")
         os.makedirs(parent_dir, exist_ok=True)
 
         # Write file (atomic: write to temp, move to target)
-        temp_path = path + ".tmp"
+        temp_path = abs_path + ".tmp"
         try:
             logger.debug(f"Writing content to temp file: {temp_path}")
             with open(temp_path, "w") as f:
                 f.write(content)
-            logger.debug(f"Renaming temp file to: {path}")
-            os.rename(temp_path, path)
-            logger.info(f"File created successfully: {path}")
-            logger.debug(f"File exists after creation: {os.path.exists(path)}")
-            logger.debug(f"File size: {os.path.getsize(path)} bytes")
+            logger.debug(f"Renaming temp file to: {abs_path}")
+            os.rename(temp_path, abs_path)
+            logger.info(f"File created successfully: {abs_path}")
+            logger.debug(f"File exists after creation: {os.path.exists(abs_path)}")
+            logger.debug(f"File size: {os.path.getsize(abs_path)} bytes")
         except Exception as e:
             if os.path.exists(temp_path):
                 logger.debug(f"Cleaning up temp file: {temp_path}")
@@ -683,38 +733,37 @@ def create_file(path: str, content: str, language: str = "python", description: 
             raise e
 
         # Auto-index if language is supported to create symbol nodes with anchors
+        # Pass the absolute path so index_file can find the file on disk
         supported_languages = {"python", "typescript", "javascript", "jsx", "tsx"}
         indexed = False
         symbols_indexed = 0
         symbols = []
         if language.lower() in supported_languages:
             try:
-                index_result = index_file(path)
+                index_result = index_file(abs_path)
                 result_data = json.loads(index_result)
                 indexed = result_data.get("status") == "ok"
                 symbols_indexed = result_data.get("symbols_indexed", 0)
                 symbols = result_data.get("symbols", [])
-                logger.info(f"Auto-indexed file: {path} with {symbols_indexed} symbols")
+                logger.info(f"Auto-indexed file: {abs_path} with {symbols_indexed} symbols")
             except Exception as e:
-                logger.warning(f"Auto-indexing failed for {path}: {e}")
-
-        # Normalize path for node IDs (use forward slashes like index_file does)
-        normalized_path = path.replace("\\", "/")
+                logger.warning(f"Auto-indexing failed for {abs_path}: {e}")
 
         # Verify persistence: check indexed symbols or file-level node
+        # Use rel_path (what index_file stores) to look up nodes
         verified = None
-        code_node_id = f"code:{normalized_path}"  # Default file-level node ID
+        code_node_id = f"code:{rel_path}"  # Default file-level node ID
 
         if symbols_indexed > 0 and symbols:
             # If we indexed symbols, verify the first one (which proves the file was indexed)
             first_symbol = symbols[0]
-            verified_node_id = f"code:{normalized_path}:{first_symbol}"
+            verified_node_id = f"code:{rel_path}:{first_symbol}"
             verified = db.verify_node(verified_node_id)
             code_node_id = verified_node_id
-            logger.debug(f"Verifying indexed symbol: {verified_node_id}")
+            logger.debug(f"Verifying indexed symbol: {verified_node_id}, result: {verified is not None}")
         else:
             # If no symbols (empty file or unsupported language), create and verify file-level node
-            db.upsert_node(code_node_id, "CODE_BLOCK", content[:500], normalized_path)
+            db.upsert_node(code_node_id, "CODE_BLOCK", content[:500], rel_path)
             verified = db.verify_node(code_node_id)
             logger.debug(f"Created file-level node: {code_node_id}")
 
@@ -724,13 +773,13 @@ def create_file(path: str, content: str, language: str = "python", description: 
             {
                 "status": "ok",
                 "code_node_id": code_node_id,
-                "path": path,
+                "path": rel_path,
                 "language": language,
                 "created_at": created_at,
                 "auto_indexed": indexed,
                 "symbols_indexed": symbols_indexed,
                 "verified_node": verified,
-                "message": f"File '{path}' created and registered in graph" + (f" (auto-indexed {symbols_indexed} symbols)" if indexed and symbols_indexed > 0 else ""),
+                "message": f"File '{rel_path}' created and registered in graph" + (f" (auto-indexed {symbols_indexed} symbols)" if indexed and symbols_indexed > 0 else ""),
                 "next_steps": [
                     "Symbols are indexed and anchored" if symbols_indexed > 0 else "File created (no symbols found or unsupported language)"
                 ]
@@ -755,28 +804,32 @@ def move_file(old_path: str, new_path: str) -> str:
     logger.debug(f"move_file() called: {old_path} -> {new_path}")
 
     try:
-        import os
         import shutil
 
+        # Resolve to absolute paths (relative paths go relative to workspace root)
+        abs_old = _resolve_path(old_path)
+        abs_new = _resolve_path(new_path)
+        # Relative paths from workspace root for DB storage
+        rel_old = _to_rel_path(abs_old)
+        rel_new = _to_rel_path(abs_new)
+        logger.debug(f"Moving: {abs_old} -> {abs_new} (db: {rel_old} -> {rel_new})")
+
         # Move file
-        if not os.path.exists(old_path):
+        if not os.path.exists(abs_old):
             return json.dumps({"status": "error", "message": f"File not found: {old_path}"})
 
-        os.makedirs(os.path.dirname(new_path) or ".", exist_ok=True)
-        shutil.move(old_path, new_path)
-        logger.info(f"File moved: {old_path} -> {new_path}")
+        os.makedirs(os.path.dirname(abs_new), exist_ok=True)
+        shutil.move(abs_old, abs_new)
+        logger.info(f"File moved: {abs_old} -> {abs_new}")
 
-        # Update CODE_BLOCK node path
-        # Normalize paths to forward slashes (like other tools do)
-        old_normalized = old_path.replace("\\", "/")
-        new_normalized = new_path.replace("\\", "/")
-        old_node_id = f"code:{old_normalized}"
-        new_node_id = f"code:{new_normalized}"
+        # Update CODE_BLOCK node path using relative paths
+        old_node_id = f"code:{rel_old}"
+        new_node_id = f"code:{rel_new}"
 
         old_node = db.get_node(old_node_id)
         if old_node:
             # Copy node to new ID and delete old
-            db.upsert_node(new_node_id, old_node["type"], old_node["content"], new_normalized)
+            db.upsert_node(new_node_id, old_node["type"], old_node["content"], rel_new)
             # Note: We don't delete old_node since we want to preserve history
 
         # Verify persistence
@@ -786,7 +839,7 @@ def move_file(old_path: str, new_path: str) -> str:
                 "status": "ok",
                 "old_node_id": old_node_id,
                 "new_node_id": new_node_id,
-                "new_path": new_path,
+                "new_path": rel_new,
                 "verified_node": verified,
                 "message": f"File moved and graph updated"
             }
@@ -1046,6 +1099,31 @@ describe('{symbol_func}', () => {{
     except Exception as e:
         logger.error(f"Failed to generate tests: {e}")
         return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool()
+def debug_info() -> str:
+    """Return diagnostic info about the ShadowGraph server environment.
+
+    Call this first to verify the server is running and check paths.
+    """
+    import sqlite3 as _sqlite3
+    node_count = 0
+    try:
+        node_count = db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+    except Exception as e:
+        node_count = f"error: {e}"
+
+    return json.dumps({
+        "status": "ok",
+        "workspace_root": WORKSPACE_ROOT,
+        "db_path": _abs_db_path,
+        "db_exists": os.path.exists(_abs_db_path),
+        "db_size_bytes": os.path.getsize(_abs_db_path) if os.path.exists(_abs_db_path) else 0,
+        "node_count": node_count,
+        "cwd": os.getcwd(),
+        "shadow_db_path_env": os.environ.get("SHADOW_DB_PATH", "(not set)"),
+    })
 
 
 # Entry point
