@@ -364,4 +364,117 @@ export function registerCommands(
             }
         )
     );
+
+    // Export graph to JSONL for git tracking
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            'shadowgraph.exportGraph',
+            async () => {
+                try {
+                    if (!workspaceFolder) {
+                        vscode.window.showErrorMessage(
+                            'ShadowGraph: No workspace folder open'
+                        );
+                        return;
+                    }
+
+                    const shadowDir = path.join(
+                        workspaceFolder.uri.fsPath,
+                        '.shadow'
+                    );
+                    const graphPath = path.join(shadowDir, 'graph.jsonl');
+
+                    // Call Python serializer
+                    const scriptContent = `
+import json
+import sys
+import os
+sys.path.insert(0, '${path.join(workspaceFolder.uri.fsPath, 'src', 'server')}')
+
+from serializer import serialize_database
+
+try:
+    os.makedirs('${shadowDir}', exist_ok=True)
+    serialize_database('${dbPath}', '${graphPath}')
+    print(json.dumps({
+        "status": "ok",
+        "message": "Graph exported successfully"
+    }))
+except Exception as e:
+    print(json.dumps({
+        "status": "error",
+        "error": str(e)
+    }))
+`;
+
+                    const { execFile } = require('child_process');
+                    execFile(pythonInfo.pythonPath, ['-c', scriptContent], (err: any, stdout: string) => {
+                        if (err) {
+                            vscode.window.showErrorMessage(
+                                `ShadowGraph: Export failed: ${err}`
+                            );
+                            return;
+                        }
+
+                        try {
+                            const result = JSON.parse(stdout);
+                            if (result.status === 'ok') {
+                                vscode.window.showInformationMessage(
+                                    `ShadowGraph: Graph exported to .shadow/graph.jsonl. Commit this file to share with your team.`
+                                );
+                                console.log('[ShadowGraph] Graph exported to', graphPath);
+                            } else {
+                                vscode.window.showErrorMessage(
+                                    `ShadowGraph: Export failed: ${result.error}`
+                                );
+                            }
+                        } catch {
+                            vscode.window.showErrorMessage(
+                                `ShadowGraph: Failed to parse export response`
+                            );
+                        }
+                    });
+                } catch (err) {
+                    vscode.window.showErrorMessage(
+                        `ShadowGraph: Export error: ${err}`
+                    );
+                }
+            }
+        )
+    );
+
+    // Show git integration status
+    context.subscriptions.push(
+        vscode.commands.registerCommand(
+            'shadowgraph.showGitStatus',
+            async () => {
+                const message = `
+[ShadowGraph Git Integration]
+
+Graph Sharing via Git:
+- Your semantic graph is stored in: .shadow/graph.jsonl
+- This file is designed to be git-tracked
+- Commit and push it to share your graph with teammates
+
+Team Collaboration:
+1. Make changes locally (add thoughts, index files)
+2. Run: ShadowGraph: Export Graph
+3. Commit and push .shadow/graph.jsonl
+4. Teammates pull and automatically sync their databases
+
+Enable Git Integration:
+- In VS Code settings: shadowgraph.enableGitIntegration = true
+- The watcher will auto-sync when .shadow/graph.jsonl changes
+
+Version Control:
+- The .vscode/shadow.db file is local (NOT committed)
+- The .shadow/graph.jsonl file is shareable (committed)
+- Use .gitignore to exclude *.db files
+`;
+
+                vscode.window.showInformationMessage(message, { modal: false });
+                console.log('[ShadowGraph]', message);
+            }
+        )
+    );
 }

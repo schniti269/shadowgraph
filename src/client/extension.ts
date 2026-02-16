@@ -5,6 +5,7 @@ import { ShadowDatabase } from './database';
 import { ShadowCodeLensProvider } from './codelens';
 import { StaleDecorationManager } from './decorations';
 import { registerCommands } from './commands';
+import { GitIntegrationManager, showGitIntegrationStatus } from './git-integration';
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('[ShadowGraph] Extension activation started');
@@ -121,6 +122,22 @@ export async function activate(context: vscode.ExtensionContext) {
 
     // Register commands
     registerCommands(context, db, pythonInfo, codeLensProvider, staleManager);
+
+    // Initialize git integration if enabled
+    const config = vscode.workspace.getConfiguration('shadowgraph');
+    const enableGitIntegration = config.get('enableGitIntegration', false);
+
+    if (enableGitIntegration) {
+        console.log('[ShadowGraph] Enabling git integration for team collaboration');
+        const gitIntegration = new GitIntegrationManager(
+            workspaceFolder,
+            db,
+            pythonInfo.pythonPath,
+            dbPath
+        );
+        gitIntegration.activate();
+        context.subscriptions.push(gitIntegration);
+    }
 
     // Watch shadow.db for changes (Python server writes trigger UI refresh)
     const watcher = vscode.workspace.createFileSystemWatcher(
