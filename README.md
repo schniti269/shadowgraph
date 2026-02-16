@@ -1,359 +1,353 @@
 # ShadowGraph
 
-> **Code is the Output (What). The Graph is the Intent (Why).**
+> **Code is a Graph of States. Why should documentation be anything else?**
 
-**Stop reading codebases to understand them. Start indexing them instead.**
+## The Core Insight
 
-ShadowGraph is a **Semantic Shadow Layer** for your code—an invisible, persistent knowledge graph that captures why your code exists, not just what it does. It's anchored to code symbols via stable AST hashes, so it survives refactoring, version control integration, and evolution.
+When you compile code, you get a **directed acyclic graph (DAG)** of states and transitions. Each function is a node. Each call is an edge. The compiled binary *is* the graph.
 
-## The Crisis: Amnesic AI Agents + Comment Bloat
+But when you try to understand the code—when you ask "what breaks if I change this?"—you're forced to read **static text comments** that:
 
-### The Problem
+- **Bloat the context window** (degrading AI agent reasoning)
+- **Drift out of sync** (orphaned after refactoring)
+- **Don't express relationships** (no edges, no causality)
+- **Can't be queried** (you have to read them manually)
 
-**Current AI agents are amnesic:**
-- They see code as text (the Result)
-- They lose the reasoning (the Why)
-- They re-discover constraints each session
-- They hallucinate because context is incomplete
+**ShadowGraph solves this:** It creates a **semantic knowledge graph** that mirrors the code graph—not as static comments, but as queryable, versioned, agent-accessible connections.
 
-**Meanwhile, developers drown in comment bloat:**
+## The Problem: Static Comments Destroy Context
+
+### Why Comments Are Broken for AI Agents
+
+An AI agent trying to debug or modify code faces a **context trilemma**:
+
+```
+Option 1: Read all comments
+→ Context bloat (10,000+ tokens)
+→ LLM loses precision ("Lost in the Middle")
+→ Hallucinations spike
+→ Cost: $0.05 per query
+
+Option 2: Read only relevant files
+→ Miss critical constraints (in unrelated files)
+→ Break invariants unknowingly
+→ Silent failures in production
+
+Option 3: Ignore comments entirely
+→ Miss intent entirely
+→ Reinvent decisions already made
+→ Waste tokens re-discovering constraints
+```
+
+**None of these options work.** Why? Because comments are **static text**, not **structured relationships**.
+
+### The Real Problem: Comments Don't Express Graphs
+
+Code has structure:
+
+```
+Function A → calls → Function B → depends on → Database X
+Function B → validates → Constraint Y (idempotency required)
+Constraint Y → implemented via → Redis cache with 24h TTL
+```
+
+But comments express this as:
+
+```
+// See Function B for logic
+// TODO: verify idempotency
+// NOTE: Redis cache TTL is 24 hours (see config)
+```
+
+**A comment is just text.** It can't express:
+
+- ❌ "Don't change this without also changing that"
+- ❌ "This breaks if the dependency drifts"
+- ❌ "This was added to satisfy constraint X"
+- ❌ "This is O(n^2) for dataset < 100 items"
+
+An AI agent reading this text has to **infer** the relationships. It guesses. It hallucinates.
+
+## The Solution: A Semantic Knowledge Graph
+
+ShadowGraph creates a **queryable graph** where code's intent is explicit as edges and nodes—not implicit as comments.
+
 ```python
+# Code (clean, no bloat):
 def charge(amount):
-    """Process payment with Stripe."""
-    # NOTE: We swallow Stripe errors because of idempotency keys.
-    # When charge(X) fails after a retry, the retry hits an
-    # 'already charged' error. Stripe returns 409 Conflict.
-    # We ignore it to prevent duplicate charges.
-    # DO NOT REMOVE without consulting the Payment team.
-    # Also see: require auth token first (line 45)
-    # Also see: check fraud detection (line 120)
-    # Also see: log to payment audit system (line 200)
     try:
         return stripe.charge(amount)
     except StripeError:
-        # This is intentional. See comments above.
+        return None
+
+# Graph (in ShadowGraph, not in code):
+{
+  "node": "charge()",
+  "type": "function",
+  "thoughts": [
+    "Swallow Stripe errors due to idempotency keys",
+    "If retry hits 'already charged' error, we ignore 409 Conflict"
+  ],
+  "edges": {
+    "depends_on": ["stripe.charge()", "idempotency_key_handler()"],
+    "required_by": ["CONSTRAINT: Payment must be idempotent"],
+    "called_by": ["OrderService.place_order()"],
+    "breaks_if_changed": [
+      "stripe.charge() return type",
+      "redis cache TTL (currently 24h)"
+    ]
+  },
+  "warnings": {
+    "stale_dependency": "idempotency_key_handler() changed 3 days ago"
+  }
+}
+```
+
+**Now an AI agent can query:**
+
+- ✅ "What are the thoughts on this function?"
+- ✅ "What breaks if I change this?"
+- ✅ "What constraints apply here?"
+- ✅ "What changed in my dependencies recently?"
+- ✅ "What calls this function?"
+
+**Result:** 200 tokens of focused, structured context instead of 10,000 tokens of bloated text.
+
+## Why This Matters for AI Agents
+
+### The Context Window Problem
+
+When an AI agent sees:
+
+```
+def charge(amount):
+    """Process payment."""
+    # We swallow errors because of idempotency
+    # Don't change without consulting payment team
+    # Also see: AuthService (line 45)
+    # Also see: CurrencyConverter (line 120)
+    # Also see: fraud detection (line 200)
+    # NOTE: Redis cache used here
+    # NOTE: Stripe API v2 endpoint
+    # See config.py for stripe key
+    try:
+        return stripe.charge(amount)
+    except StripeError:
+        # Intentional (see comments above)
         return None
 ```
 
-**The underlying cause:** Comments are **text anchors bound to line numbers**. When code is refactored, comments drift, become orphaned, or—worse—point to the wrong logic.
+The agent thinks:
 
-### Why This Matters: The Science
+- "OK, so I need to read 5 other files"
+- "I need to see config.py"
+- "Maybe I need to check Stripe API docs"
+- "I should look at the payment team's Slack"
 
-**Standard RAG (Vector Search) Fails:**
-- Dumps 500 lines into the context window
-- LLM reasoning degrades non-linearly as context grows ("Lost in the Middle" phenomenon)
-- Finds *lexically similar* code, not *causally related* code
-- Example: Searching "User" returns user auth, user DB, user UI—but not the business constraint "Users must be 18+"
+So it pulls in 2,000 lines across 8 files. The context window explodes. The LLM's reasoning degrades. **Hallucinations increase.**
 
-**ShadowGraph's Semantic Topology:**
-- Provides **high-density context**: 5 lines instead of 500
-- **90% fewer tokens** for equivalent understanding
-- Finds *causally related* code: "User age check" → "Insurance legal constraint" → "GDPR requirement"
-- Preserves the **Why alongside the What**
+### With ShadowGraph
 
-## The Solution: Semantic Anchoring via AST Hash
+Agent sees a **graph query result:**
 
-ShadowGraph links thoughts **not to line numbers, but to function AST signatures**. The hash of a function's structure is stable across whitespace changes and minor refactors.
+```json
+{
+  "charge()": {
+    "thoughts": [
+      "Swallow errors due to idempotency keys (Stripe returns 409)",
+      "If charge fails after retry, retry hits 'already charged'"
+    ],
+    "depends_on": [
+      {"symbol": "stripe.charge()", "status": "valid"},
+      {"symbol": "idempotency_key()", "status": "stale", "changed": "3d ago"}
+    ],
+    "constraints": [
+      {"rule": "Must be idempotent", "severity": "critical"}
+    ]
+  }
+}
+```
+
+The agent has **20 tokens of focused context**. It knows:
+
+- ✅ The intent (why this code exists)
+- ✅ The constraints (what it must do)
+- ✅ The risks (what changed recently, what breaks it)
+- ✅ The topology (what depends on it, what it depends on)
+
+**No hallucinations. Perfect clarity. 50x cheaper.**
+
+## How ShadowGraph Saves Intent
+
+### 1. **Agents Record Thoughts**
+
+When an AI agent modifies code, it doesn't just edit—it records **why**:
+
+```
+Agent: "I'm updating the Stripe API call to v3"
+→ ShadowGraph records:
+   - THOUGHT: "Migrated to Stripe API v3. Returns different error codes."
+   - EDGE: Updated charge() → depends_on → stripe.charge_v3()
+   - STALE: Marked idempotency_key() as STALE (might need adjustment)
+```
+
+### 2. **Thoughts Anchor to Symbols, Not Lines**
+
+Comments die when code is refactored. Thoughts stay:
 
 ```python
-# Clean code (ZERO comment bloat)
+# Before refactoring:
 def charge(amount):
+    # Line 42: Swallow Stripe errors due to idempotency
     try:
-        return stripe.charge(amount)
+        stripe.charge(amount)
     except StripeError:
         return None
 
-# The thought lives in the ShadowGraph (not in code):
-# 🧠 "Swallow Stripe errors due to idempotency keys.
-#    If charge(X) fails after retry, retry hits 'already charged'.
-#    Stripe returns 409 Conflict → we ignore it.
-#    Design: Accept false negatives to prevent duplicates."
-
-# After refactoring (adding retry logic):
+# After refactoring (added retry logic):
 def charge_with_retry(amount, max_retries=3):
     for attempt in range(max_retries):
         try:
-            return stripe.charge(amount)
+            stripe.charge(amount)
         except StripeError:
             if attempt < max_retries - 1:
-                wait_exponential(attempt)
+                wait(attempt)
             else:
                 return None
 
-# 🧠 Thought STILL ATTACHED.
-# Not because of line numbers (those changed).
-# Because the AST signature of the core logic remains:
-# "charge Stripe → catch StripeError → return None"
+# Old comment: LOST (was at line 42, now code is different)
+# ShadowGraph thought: ATTACHED (anchored to charge() function signature)
 ```
 
-**The key insight:** Functions are more stable than lines. Refactoring preserves function semantics; it breaks line-based anchors.
+### 3. **Agents Know What Will Break**
 
-## Why This Changes Everything
-
-### 1. Context Management: 95% Less Noise
-
-**Without ShadowGraph (1+ hours):**
-```
-Error: "Duplicate payment detected"
-
-→ Open PaymentProcessor.ts (800 lines)
-→ Find charge() function (50 lines code + 40 lines comments)
-→ Read 10 related functions to understand flow
-→ Search: "idempotency"? "cache"? "stripe"?
-→ Check git history (5 commits, 3 authors)
-→ Slack: "Hey, why do we swallow Stripe errors?" (wait for response)
-→ Realize: It's a Redis TTL issue + error handling interaction
-```
-
-**With ShadowGraph (2 minutes):**
-```
-Error: "Duplicate payment detected"
-
-→ Click charge() → See CodeLens: "🧠 2 linked thoughts"
-→ Thought #1: "Swallow errors due to idempotency keys. ..."
-→ Thought #2: "Redis cache TTL = 24 hours. After expiry, same charge can retry."
-→ See: ⚠️ STALE (changed 3 days ago by @alice)
-→ Diagnosis: Cache expired + new error handling = duplicate
-```
-
-**Savings:** 95% context reduction. 95% token reduction for AI agents.
-
-### 2. Token Minimization for AI Coding Agents
-
-**Traditional RAG workflow:**
-```
-Agent prompt: "Debug the duplicate charge issue in payment.ts"
-
-Agent reads:
-- /app/payment.ts (500 lines)
-- /app/stripe.ts (800 lines)
-- /app/idempotency.ts (300 lines)
-- /app/retry-logic.ts (400 lines)
-- /app/cache.ts (250 lines)
-- Comments scattered across all files
-
-Total: ~2,250 lines
-Tokens: 10,000+
-Cost: $0.05 per query
-Output: Probably hallucinated (too much context)
-```
-
-**With ShadowGraph:**
-```
-Agent query: query_blast_radius("charge", depth=2)
-
-Returns:
-- charge() code + 3 attached thoughts (10 lines)
-- Direct dependencies: stripe.charge, idempotency_key, cache (5 lines)
-- Recent changes: "error handling updated 3 days ago" (2 lines)
-- Stale flags: "idempotency thought is 2 weeks old, code changed yesterday" (2 lines)
-
-Total: ~20 lines
-Tokens: 200
-Cost: $0.001 per query
-Output: Accurate (has focused context)
-
-Benefit: 50x token reduction, 50x cost reduction
-```
-
-### 3. Maintainability: Code + Intent Evolve Together
-
-**The Problem (Traditional):**
-```python
-# Written 6 months ago
-def charge(amount):
-    # "Handle idempotency to prevent duplicate charges"
-    # (Code refactored 3 times since)
-    # (Comment now points to line 200, but logic is at line 80)
-    # (New developer reads it, gets confused)
-    try:
-        return stripe.charge(amount)
-    except StripeError:
-        return None
-```
-
-**With ShadowGraph (Drift Detection):**
-```python
-def charge(amount):
-    # No comment bloat
-    try:
-        return stripe.charge(amount)
-    except StripeError:
-        return None
-
-# In the ShadowGraph:
-# 🧠 Original thought: "Handle idempotency to prevent duplicates"
-# ⚠️ STALE FLAG: Code has changed, thought is 2 weeks old
-# → Developer is FORCED to review/update the thought
-# → Intent and code stay synchronized
-```
-
-**Result:** Thoughts validate against code. They can't lie because they're checked against code reality.
-
-## The Killer Feature: Query the Dependency Graph
-
-Instead of reading files, you query the semantic graph.
+Before making a change, an agent can query:
 
 ```python
 query_blast_radius("charge", depth=2)
 
-# Returns:
+Returns:
 {
-  "origin": {
-    "symbol": "charge()",
-    "thoughts": [
-      "Swallow errors due to idempotency keys. ...",
-      "Design: Accept false negatives to prevent duplicates."
-    ]
-  },
-  "dependencies_outgoing": [
-    {"symbol": "stripe.charge()", "stale": false},
-    {"symbol": "idempotency_key()", "stale": true, "changed": "3 days ago"},
-    {"symbol": "cache.get()", "stale": false}
+  "what_depends_on_me": [
+    "OrderService.place_order()",
+    "webhook.handle_charge_retry()"
   ],
-  "dependents_incoming": [
-    {"symbol": "OrderService.place_order()"},
-    {"symbol": "webhook.handle_retry()"}
+  "what_i_depend_on": [
+    "stripe.charge() [STALE: changed 3 days ago]",
+    "idempotency_key() [valid]",
+    "CONSTRAINT: Payment must be idempotent"
   ],
-  "constraints": [
-    {"rule": "Must be idempotent", "severity": "critical"}
+  "if_i_change": [
+    "⚠️ OrderService might break (verify idempotency still holds)",
+    "⚠️ Webhook retry logic depends on error behavior"
   ]
 }
 ```
 
-**This answers the questions without reading files:**
-- ✓ What changed recently? (stale flags)
-- ✓ What depends on this? (incoming edges)
-- ✓ What does this depend on? (outgoing edges)
-- ✓ Why was it written this way? (attached thoughts)
-- ✓ What rules must I follow? (constraints)
+Agent sees the risks before making changes. **No silent failures.**
 
-## Real Scenario: The 3 AM Bug
+### 4. **Knowledge Persists Across Sessions**
 
-### Without ShadowGraph (2 hours to fix)
+Every thought, constraint, and decision is **saved in a graph** (not as comments):
+
 ```
-2:45 AM: Slack: "Duplicate charges detected 🚨"
-2:46 AM: Open PaymentProcessor.ts (800 lines, 40% comments)
-2:50 AM: Find charge() + read comments
-3:00 AM: Read idempotency_key_handler() (unclear if relevant)
-3:10 AM: Search code for "duplicate" (finds nothing relevant)
-3:20 AM: Check git log (last idempotency change was 3 days ago)
-3:30 AM: Realize: Redis cache TTL + new error handling interaction
-3:45 AM: Ask Redis team to verify
-4:00 AM: Confirmed: Cache expired 1 hour ago
-4:15 AM: Fix deployed (extend TTL or change error handling)
+Session 1 (Day 1):
+- Agent: "Added caching to reduce DB calls"
+- Records: THOUGHT linked to function
 
-Total: 90 minutes
-Tokens wasted: 10,000
-Root cause discovery: Tedious manual navigation
+Session 2 (Day 7):
+- Agent: "Seeing stale data. Need to invalidate cache."
+- Queries: "Show me all thoughts about this function"
+- Sees: "Cache added 7 days ago. TTL is 24h."
+- Diagnosis: "Cache invalidation issue" (not re-discovered from scratch)
 ```
 
-### With ShadowGraph (5 minutes to fix)
-```
-2:45 AM: Slack: "Duplicate charges detected 🚨"
-2:46 AM: Click charge() → See CodeLens: "🧠 3 thoughts"
-2:47 AM: Read thought #1: "Swallow errors due to idempotency"
-2:48 AM: Read thought #2: "Redis cache TTL = 24h"
-2:49 AM: See ⚠️ STALE: "idempotency updated 3 days ago"
-2:50 AM: Query blast_radius("charge") → See dependencies
-2:51 AM: Diagnosis: Cache expired + new error handling
-2:52 AM: Fix: Extend TTL or update error handler
-2:54 AM: Deploy
+## What This Enables
 
-Total: 9 minutes
-Tokens used: 200
-Root cause discovery: Immediate (thought + dependency graph)
-```
+### For Agents
 
-## What This Gives You
+- **Structured reasoning:** Query the graph, don't read text
+- **Constraint awareness:** Know rules before you break them
+- **Debugging precision:** See dependencies and stale edges
+- **Long-term memory:** Thoughts persist across sessions
 
-| Problem | ShadowGraph Solution |
-|---------|----------------------|
-| **Comment bloat** | Anchor thoughts to AST, not lines. Code stays clean. |
-| **Lost intent** | Graph is searchable, versioned in Git, queryable by agents. |
-| **Onboarding slowness** | New hires query the graph instead of reading 50 files. |
-| **AI hallucinations** | Agents get 200 tokens of focused context instead of 10,000. |
-| **Code review waste** | Reviewers see constraints before diving into code. |
-| **Silent failures** | Constraints (e.g., "payment must be idempotent") attached to code. |
-| **Stale documentation** | Thoughts marked STALE when code drifts. Must be updated. |
-| **Tribal knowledge** | Graph shared via Git. Teammates see your reasoning. |
+### For Developers
 
-## Installation & Workflow
+- **Zero comment bloat:** Code stays clean and readable
+- **Intent preservation:** Thoughts validate against code drift
+- **Team knowledge:** Graph is Git-tracked; teammates see your reasoning
+- **Debugging speed:** Agents can pinpoint root causes in minutes, not hours
 
-### 1. Index Your Codebase
+### For Companies
+
+- **Faster onboarding:** New hires query the graph instead of reading 100 files
+- **Fewer bugs:** Agents understand constraints before modifying code
+- **Lower AI costs:** 50x token reduction = 50x cheaper per query
+- **Preserved intent:** Code + reasoning evolve together
+
+## The Fundamental Difference
+
+| Traditional                                             | ShadowGraph                                                   |
+| ------------------------------------------------------- | ------------------------------------------------------------- |
+| **Comments:** Static text, bound to lines         | **Graph:** Queryable nodes and edges                    |
+| **Structure:** Narrative prose                    | **Structure:** Causal relationships                     |
+| **For agents:** Context bloat, hallucinations     | **For agents:** Precise context, 50x fewer tokens       |
+| **Maintenance:** Comments drift after refactoring | **Maintenance:** Thoughts validated by code drift       |
+| **Debugging:** "Read this file and figure it out" | **Debugging:** "Query the graph, here are the answers"  |
+| **Expressiveness:** "See line 45 for more info"   | **Expressiveness:** "Function X breaks if you change Y" |
+
+## How It Works
+
+### 1. Index Your Code
+
 ```bash
-CMD+Shift+P → ShadowGraph: Index Current File
+ShadowGraph: Index Current File
 ```
-Extracts functions/classes via tree-sitter AST parsing.
 
-### 2. Add Thoughts While Coding
-```bash
-Click symbol → CMD+Shift+P → ShadowGraph: Add Thought
+Extracts functions/classes via tree-sitter AST hashing.
 
-💭 "This function is O(n^2) because dataset is < 100 items.
-    Do not optimize; cost of refactor > benefit."
+### 2. Agents Record Thoughts
+
+```python
+# While modifying code:
+agent_records_thought(
+    symbol="charge()",
+    thought="Updated to Stripe API v3. Error codes now different.",
+    context="Idempotency still required. Cache TTL still 24h."
+)
 ```
-Thought anchored to function's AST hash (survives refactoring).
 
-### 3. Share with Team via Git
+### 3. Query the Graph for Debugging
+
+```python
+query_blast_radius("charge", depth=2)
+# Returns: All connected nodes, edges, thoughts, constraints, warnings
+```
+
+### 4. Share with Team
+
 ```bash
 git add .shadow/graph.jsonl
-git commit -m "docs: add architectural context"
+git commit -m "docs: record architectural decisions"
 git push
 ```
-Teammates pull and instantly see thoughts in CodeLens.
 
-### 4. Query for Debugging
-```python
-query_blast_radius("function_name", depth=2)
-# Get: code + thoughts + dependencies + stale flags
-```
-
-## The Technical Stack
-
-- **Frontend:** VS Code Extension (TypeScript)
-- **Backend:** MCP Server (Python) with tree-sitter + SQLite
-- **Database:** SQLite + sqlite-vec (WASM, embedded)
-- **Anchoring:** AST hash of function body (whitespace-insensitive SHA256)
-- **Versioning:** JSON Lines (.shadow/graph.jsonl) tracked in Git
-- **Agent Interface:** 8 MCP tools exposed to Copilot Chat
-
-## Why ShadowGraph Is Different
-
-✅ **Not just comments** - Anchored to AST structure, survives refactoring
-✅ **Not just RAG** - Semantic graph topology, not vector search
-✅ **Not just tags** - Full causal relationships (depends_on, impacts, constrains)
-✅ **Not just local** - Graph is Git-tracked; knowledge persists across teams
-✅ **For AI agents** - MCP tools provide surgical context, not bloat
-✅ **For humans** - No comment maintenance burden; thoughts validated by code drift
+Teammates pull and instantly see all context.
 
 ## The Vision
 
-**Developers spend 70% of time reading code to understand it.**
+**Code is a graph. Documentation should be a graph. Agents should query it.**
 
-ShadowGraph reduces that to 5% by making intent **queryable instead of readable**.
+Instead of static comments that decay, ShadowGraph creates a **semantic knowledge layer** that:
 
-```
-Before:
-"Why does this code work this way?"
-→ Read function (50 lines)
-→ Read related functions (500 lines)
-→ Read comments (outdated)
-→ Check git history (5 commits)
-→ Ask on Slack (wait for response)
-→ 1 hour later: Understanding achieved
+- Mirrors the code graph (nodes = functions, edges = calls + constraints)
+- Expresses causality ("this breaks if that changes")
+- Saves agent reasoning (what it learned, what it feared)
+- Stays in sync (validation against code drift)
+- Is queryable (structured data, not prose)
 
-After:
-"Why does this code work this way?"
-→ Hover over symbol
-→ Click attached thought
-→ 10 seconds: Understanding achieved
-```
-
-**Impact:** 100 developers × 365 days × 10 hours/day = **365,000 hours/year saved per company.**
+**Result:** Agents work with precision, not guessing. Debugging takes minutes, not hours. Code + intent evolve together.
 
 ---
 
-**Don't just commit code. Commit understanding.**
-
-Made with 🧠 by developers tired of reading.
+**The future of code isn't comments. It's graphs.**
