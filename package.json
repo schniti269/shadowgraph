@@ -26,7 +26,7 @@
         "team-context",
         "blast-radius"
     ],
-    "icon": "icons/thought.svg",
+    "icon": "icons/thought.png",
     "galleryBanner": {
         "color": "#2c3e50",
         "theme": "dark"
@@ -40,7 +40,19 @@
         "AI"
     ],
     "activationEvents": [
-        "*"
+        "workspaceContains:**/*.py",
+        "workspaceContains:**/*.ts",
+        "workspaceContains:**/*.js",
+        "workspaceContains:**/*.jsx",
+        "workspaceContains:**/*.tsx",
+        "onCommand:shadowgraph.initialize",
+        "onCommand:shadowgraph.indexCurrentFile",
+        "onCommand:shadowgraph.checkDrift",
+        "onCommand:shadowgraph.showThoughts",
+        "onCommand:shadowgraph.addThought",
+        "onCommand:shadowgraph.showStatus",
+        "onCommand:shadowgraph.runDiagnostics",
+        "onCommand:shadowgraph.analyzeBlastRadius"
     ],
     "main": "./dist/extension.js",
     "contributes": {
@@ -132,5 +144,8 @@
     "dependencies": {
         "@vscode/vsce": "^3.7.1",
         "sql.js": "^1.11.0"
+    },
+    "optionalDependencies": {
+        "@esbuild/win32-ia32": "^0.27.3"
     }
 }
