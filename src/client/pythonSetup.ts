@@ -16,11 +16,31 @@ export async function ensurePythonEnv(
         ? path.join(venvPath, 'Scripts', 'python.exe')
         : path.join(venvPath, 'bin', 'python');
 
-    if (fs.existsSync(venvPython)) {
+    console.log('[ShadowGraph] Checking venv at:', venvPath);
+    console.log('[ShadowGraph] Expected venv Python:', venvPython);
+
+    // Check if venv exists AND has dependencies installed
+    let needsSetup = !fs.existsSync(venvPython);
+
+    if (!needsSetup) {
+        console.log('[ShadowGraph] Venv Python found, verifying dependencies...');
+        try {
+            const { stdout } = await execFileAsync(venvPython, ['-c', 'import tree_sitter_language_pack']);
+            console.log('[ShadowGraph] Dependencies verified, venv is ready');
+            return { pythonPath: venvPython, venvPath };
+        } catch {
+            console.log('[ShadowGraph] Dependencies missing, will reinstall...');
+            needsSetup = true;
+        }
+    }
+
+    if (!needsSetup) {
         return { pythonPath: venvPython, venvPath };
     }
 
+    console.log('[ShadowGraph] Venv not found, creating new one...');
     const systemPython = await findPython();
+    console.log('[ShadowGraph] System Python:', systemPython);
 
     await vscode.window.withProgress(
         {
@@ -29,20 +49,35 @@ export async function ensurePythonEnv(
             cancellable: false,
         },
         async (progress) => {
-            progress.report({ message: 'Creating virtual environment...' });
-            fs.mkdirSync(path.dirname(venvPath), { recursive: true });
-            await execFileAsync(systemPython, ['-m', 'venv', venvPath]);
+            try {
+                progress.report({ message: 'Creating virtual environment...' });
+                console.log('[ShadowGraph] Creating venv at:', venvPath);
+                fs.mkdirSync(path.dirname(venvPath), { recursive: true });
+                await execFileAsync(systemPython, ['-m', 'venv', venvPath]);
+                console.log('[ShadowGraph] Venv created successfully');
 
-            progress.report({ message: 'Installing dependencies...' });
-            const reqPath = path.join(context.extensionUri.fsPath, 'requirements.txt');
-            await execFileAsync(venvPython, [
-                '-m',
-                'pip',
-                'install',
-                '--quiet',
-                '-r',
-                reqPath,
-            ]);
+                progress.report({ message: 'Installing dependencies...' });
+                const reqPath = path.join(context.extensionUri.fsPath, 'requirements.txt');
+                console.log('[ShadowGraph] Requirements file:', reqPath);
+                console.log('[ShadowGraph] Requirements file exists:', fs.existsSync(reqPath));
+
+                const { stderr, stdout } = await execFileAsync(venvPython, [
+                    '-m',
+                    'pip',
+                    'install',
+                    '-r',
+                    reqPath,
+                ]);
+
+                console.log('[ShadowGraph] Pip install stdout:', stdout);
+                if (stderr) {
+                    console.log('[ShadowGraph] Pip install stderr:', stderr);
+                }
+                console.log('[ShadowGraph] Dependencies installed successfully');
+            } catch (err) {
+                console.error('[ShadowGraph] Error setting up venv:', err);
+                throw new Error(`Failed to set up Python environment: ${err}`);
+            }
         }
     );
 
