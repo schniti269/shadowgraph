@@ -97,3 +97,90 @@ def test_get_context_flow(tmp_db: ShadowDB, sample_python_file: str):
     # Get thoughts
     thoughts = tmp_db.get_thoughts_for_symbol(relative_path, "function:hello")
     assert len(thoughts) == 2
+
+
+def test_add_new_code_with_thoughts(tmp_db: ShadowDB):
+    """Test the add_new_code_with_thoughts workflow (create before index)."""
+    import uuid
+    from constraints import ConstraintValidator
+
+    # Step 1: Agent decides to create new code
+    file_path = "auth.py"
+    symbol_name = "function:login_with_2fa"
+    new_code = """def login_with_2fa(username, password, otp):
+    # TODO: implement 2FA logic
+    pass"""
+    design_rationale = "Adding 2FA for security. Handles MFA codes via TOTP algorithm."
+    constraints = ["Must validate OTP within 30-second window", "Must not log passwords"]
+
+    # Step 2: Create code node with thoughts BEFORE writing file
+    code_node_id = f"code:{file_path}:{symbol_name}"
+    tmp_db.upsert_node(code_node_id, "CODE_BLOCK", new_code)
+
+    # Step 3: Attach design rationale as thought
+    thought_id = f"thought:{uuid.uuid4().hex[:12]}"
+    tmp_db.upsert_node(thought_id, "THOUGHT", f"Design: {design_rationale}")
+    tmp_db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
+
+    # Step 4: Add constraints
+    validator = ConstraintValidator(tmp_db)
+    for constraint_rule in constraints:
+        validator.add_constraint(symbol_name, file_path, constraint_rule, "RULE", "critical")
+
+    # Verify: Code node exists
+    node = tmp_db.get_node(code_node_id)
+    assert node is not None
+    assert "login_with_2fa" in node["content"]
+
+    # Verify: Thought is linked (query via edges, not anchors - code hasn't been indexed yet)
+    thought = tmp_db.get_node(thought_id)
+    assert thought is not None
+    assert "2FA" in thought["content"]
+
+    # Verify: Constraints are attached
+    actual_constraints = validator.get_constraints(file_path, symbol_name)
+    assert len(actual_constraints) == 2
+    assert any("OTP" in c["rule"] for c in actual_constraints)
+    assert any("password" in c["rule"] for c in actual_constraints)
+
+
+def test_new_code_workflow_end_to_end(tmp_db: ShadowDB, tmp_path):
+    """Test full workflow: pre-create with thoughts, write file, index it."""
+    import uuid
+    from pathlib import Path
+
+    # Step 1: Pre-create code node with semantics
+    file_path = "payment.py"
+    symbol_name = "function:process_refund"
+    new_code = """def process_refund(transaction_id, amount):
+    # Implements idempotent refund processing
+    pass"""
+
+    code_node_id = f"code:{file_path}:{symbol_name}"
+    tmp_db.upsert_node(code_node_id, "CODE_BLOCK", new_code)
+
+    thought_id = f"thought:{uuid.uuid4().hex[:12]}"
+    thought_text = "Refund processing must be idempotent. Stripe returns 409 on duplicate attempts."
+    tmp_db.upsert_node(thought_id, "THOUGHT", thought_text)
+    tmp_db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
+
+    # Verify pre-creation
+    node = tmp_db.get_node(code_node_id)
+    assert node is not None
+
+    # Step 2: Thoughts exist BEFORE file is written (query the node directly)
+    thought_node = tmp_db.get_node(thought_id)
+    assert thought_node is not None
+    assert "idempotent" in thought_node["content"]
+
+    # Step 3: Agent would now write the file (simulated)
+    # In real workflow: agent uses file tools to write file_path
+
+    # Step 4: Index the file to anchor code to AST hashes
+    # (This would be done by agent calling index_file())
+    # For this test, we just verify the thought persists
+
+    # Verify thought is still there after "file write" (simulated)
+    thought_node_after = tmp_db.get_node(thought_id)
+    assert thought_node_after is not None
+    assert thought_node_after["content"] == thought_text

@@ -437,6 +437,85 @@ def add_constraint(
 
 
 @mcp.tool()
+def add_new_code_with_thoughts(
+    file_path: str,
+    symbol_name: str,
+    new_code: str,
+    design_rationale: str,
+    constraints: list[str] = None,
+) -> str:
+    """Create new code with semantic intent attached BEFORE writing to disk.
+
+    This is the RECOMMENDED workflow for agents creating new functionality:
+    1. Agent decides to ADD a new function/class
+    2. Agent calls this tool with code + WHY (design rationale)
+    3. This creates database entries with semantic intent
+    4. Agent then writes the actual code file
+    5. Agent calls index_file() to anchor the code to AST hashes
+
+    This ensures thoughts exist BEFORE code is written, capturing the agent's
+    reasoning for future developers and subsequent agent sessions.
+
+    Args:
+        file_path: Relative path where code will be written (e.g., "payment.py").
+        symbol_name: The symbol being created (e.g., "function:charge_with_retry").
+        new_code: The source code being added (for reference/validation).
+        design_rationale: WHY this code is being added (design decisions, trade-offs).
+        constraints: List of constraints this code must satisfy (optional).
+
+    Returns:
+        JSON with code_node_id, thoughts recorded, ready for file write.
+    """
+    logger.debug(f"add_new_code_with_thoughts() called for {file_path}:{symbol_name}")
+
+    # Create code node BEFORE file exists (code node ID format: code:{relpath}:{symbol_name})
+    code_node_id = f"code:{file_path}:{symbol_name}"
+    db.upsert_node(code_node_id, "CODE_BLOCK", new_code)
+
+    # Record the design rationale as a thought
+    thought_id = f"thought:{uuid.uuid4().hex[:12]}"
+    db.upsert_node(thought_id, "THOUGHT", f"Design: {design_rationale}")
+    db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
+
+    logger.info(f"Pre-created code node: {code_node_id} with design rationale")
+
+    # Add constraints if provided
+    constraint_ids = []
+    if constraints:
+        validator = ConstraintValidator(db)
+        for constraint_rule in constraints:
+            try:
+                cid = validator.add_constraint(
+                    symbol_name,
+                    file_path,
+                    constraint_rule,
+                    "RULE",
+                    "critical"
+                )
+                constraint_ids.append(cid)
+            except Exception as e:
+                logger.warning(f"Failed to add constraint: {e}")
+
+    created_at = datetime.datetime.utcnow().isoformat()
+
+    return json.dumps(
+        {
+            "status": "ok",
+            "code_node_id": code_node_id,
+            "thought_id": thought_id,
+            "constraints_added": len(constraint_ids),
+            "created_at": created_at,
+            "message": "Code node created with semantic intent. You may now: (1) Write the file, (2) Call index_file() to anchor with AST hash.",
+            "next_steps": [
+                "1. Write the code to disk (e.g., with file tools)",
+                "2. Call index_file() to anchor this code to AST hash",
+                "3. Thoughts will be automatically linked to the indexed symbol"
+            ]
+        }
+    )
+
+
+@mcp.tool()
 def validate_constraints(file_path: str) -> str:
     """Validate all symbols in a file against their constraints.
 
