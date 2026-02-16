@@ -14,11 +14,12 @@ class ShadowDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+
+        # Migration: Apply before schema creation to handle old databases
+        self._apply_migrations()
+
         schema_path = Path(__file__).parent / "schema.sql"
         self.conn.executescript(schema_path.read_text())
-
-        # Migration: Add missing columns if they don't exist
-        self._apply_migrations()
 
     def _apply_migrations(self) -> None:
         """Apply schema migrations for existing databases."""

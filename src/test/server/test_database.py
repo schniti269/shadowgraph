@@ -77,3 +77,40 @@ def test_get_thoughts_empty(tmp_db: ShadowDB):
 def test_get_node_nonexistent(tmp_db: ShadowDB):
     """Test that getting a nonexistent node returns None."""
     assert tmp_db.get_node("does-not-exist") is None
+
+
+def test_migration_adds_path_column(tmp_db: ShadowDB):
+    """Test that migration adds 'path' column if missing (handles old databases)."""
+    # Simulate an old database by removing the path column
+    tmp_db.conn.execute("ALTER TABLE nodes RENAME TO nodes_old")
+    tmp_db.conn.execute("""
+        CREATE TABLE nodes (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL CHECK(type IN ('CODE_BLOCK', 'THOUGHT', 'REQUIREMENT', 'CONSTRAINT', 'FOLDER')),
+            content TEXT,
+            vector BLOB,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    tmp_db.conn.execute("INSERT INTO nodes SELECT id, type, content, vector, created_at FROM nodes_old")
+    tmp_db.conn.execute("DROP TABLE nodes_old")
+    tmp_db.conn.commit()
+
+    # Verify path column doesn't exist
+    cursor = tmp_db.conn.execute("PRAGMA table_info(nodes)")
+    columns = {row[1] for row in cursor.fetchall()}
+    assert "path" not in columns
+
+    # Run migration
+    tmp_db._apply_migrations()
+
+    # Verify path column was added
+    cursor = tmp_db.conn.execute("PRAGMA table_info(nodes)")
+    columns = {row[1] for row in cursor.fetchall()}
+    assert "path" in columns
+
+    # Verify we can now insert with path
+    tmp_db.upsert_node("test-with-path", "CODE_BLOCK", "test content", "src/test.py")
+    node = tmp_db.get_node("test-with-path")
+    assert node is not None
+    assert node["path"] == "src/test.py"
