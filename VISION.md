@@ -19,32 +19,11 @@ Current development suffers from the **Context-Window Bottleneck**:
 | **Knowledge Life** | Fragile (Breaks on Refactor) | Antifragile (Updates on Drift) | **Permanent** |
 | **Onboarding** | 3 Months (Tribal Osmosis) | On-Demand (Graph Query) | **Instant** |
 
-## 3. Architecture Specification
+i pulled these numbers from thin air, but they are based on my experience and the potential impact of the tool. The key point is that ShadowGraph can drastically reduce the time and cost associated with understanding and maintaining codebases, especially for AI agents that rely on context.
 
-```mermaid
-graph TD
-    User[Developer / AI Agent] -->|MCP Protocol| Server[ShadowGraph MCP Server]
-    
-    subgraph "VS Code Extension (Client)"
-        UI[Decorations & Lenses]
-        Watcher[File Watcher]
-    end
-    
-    subgraph "The Shadow Brain (Backend)"
-        Parser[Tree-Sitter AST]
-        Drift[Drift Detector]
-        GraphEngine[SQLite + Vec]
-    end
-    
-    Watcher -->|File Save| Parser
-    Parser -->|AST Hash| Drift
-    Drift -->|Status Update| GraphEngine
-    GraphEngine -->|JSONL Sync| Git[Git Repo (.shadow/)]
-    Server -->|Query| GraphEngine
 
-```
 
-## 4. Implementation Status
+## 3. Implementation Status
 
 ### ✅ Phase 1: The Foundation (v0.1.0)
 
@@ -80,7 +59,7 @@ graph TD
 
 
 
-## 5. Next Execution Steps
+## 4. Next Execution Steps
 
 1. **Immediate:** Implement `graph_to_jsonl` serializer to enable Git tracking.
 2. **Short-term:** Build `query_blast_radius` SQL CTE.

@@ -1,120 +1,139 @@
-# ShadowGraph 🧠
-### The Missing Semantic Layer for AI Coding Agents.
+# ShadowGraph: A Semantic Knowledge Graph for AI-Driven Development
 
-![ShadowGraph Logo](icons/shadowgraph-logo.png)
+> **Store code intent in the graph where it lives, not in comments that disappear.**
 
-[![VS Code](https://img.shields.io/badge/VS%20Code-Extension-blue)](https://marketplace.visualstudio.com)
-[![MCP Ready](https://img.shields.io/badge/MCP-Compatible-green)](https://modelcontextprotocol.io)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
-> **"Don't just commit code. Commit understanding."**
-
-**ShadowGraph** creates a persistent, invisible "Shadow Layer" alongside your code. It captures **Intent**, **Constraints**, and **Relationships** in a graph database that AI agents can query—eliminating hallucinations and context window bloat.
+ShadowGraph is a **persistent knowledge graph** for long-running AI agent development. It captures **why** code exists, **what constraints** it has, and **how it connects** to other parts of the system—enabling agents to understand context without reading thousands of lines of code or forgetting what you told them last session.
 
 ---
 
-## 💥 The Problem: "Amnesic" Agents
+## 🤔 The Problem: Stateless Agents = Expensive Hallucinations
 
-When you ask an AI to refactor code, it has to read thousands of lines of text to guess *why* the code exists.
-* **It guesses.** (Hallucination)
-* **It misses context.** (Bug Introduction)
-* **It costs money.** (Massive Token Usage)
+When building or maintaining a codebase over weeks with AI agents:
 
-**Comments don't help.** They rot, they lie, and they can't be queried.
+1. **Lost Context.** Each new conversation, agents start from scratch. You re-explain the same architecture decisions, business rules, and tradeoffs.
+2. **Expensive Tokens.** You copy-paste code into prompts to restore context. A 100k codebase with an agent? That's thousands of wasted tokens per query.
+3. **Hallucinations.** Without understanding *why* code exists, agents make assumptions and introduce bugs.
+4. **Fragile Comments.** Even with inline documentation, comments rot, get deleted by refactors, and can't be queried.
 
-## 🛠️ The Solution: A Semantic Knowledge Graph
-
-ShadowGraph runs locally. It parses your code into an AST and attaches "Thought Nodes" to functions, classes, and blocks.
-
-### Compare the Difference
-
-| **Traditional AI Workflow** ❌ | **ShadowGraph Workflow** ✅ |
-| :--- | :--- |
-| **Input:** 50 Files (10k Tokens) | **Input:** 1 Graph Query (200 Tokens) |
-| **Context:** "Here is a wall of text." | **Context:** "Here is the exact dependency chain." |
-| **Reasoning:** Probabilistic Guessing | **Reasoning:** Causal Logic |
-| **Maintenance:** Comments drift & break | **Maintenance:** Links track code via AST Hash |
+**The Core Problem:** Code execution is a *graph* of dependencies and calls. But documentation is *linear*—written in comments alongside code, isolated from the structure they describe.
 
 ---
 
-## ✨ Key Features
+## 💡 The Solution: Intent as a Graph, Not as Comments
 
-### 1. ⚓ Semantic Anchoring (Refactor-Proof Notes)
-We don't link to line numbers. We link to **AST Hashes**.
-* Move a function? **The note follows.**
-* Rename a file? **The note follows.**
-* Change the logic? **The note is marked `STALE` and the Agent is warned.**
+ShadowGraph mirrors the **structure of your code** with a **knowledge graph**:
 
-### 2. 📉 Massive Context Reduction
-Instead of reading the whole file, your Agent queries the graph:
-```python
-# Agent Query:
-query_blast_radius("ProcessPayment", depth=2)
+- **Code = Nodes** (functions, classes, files)
+- **Dependencies = Edges** (calls, imports, references)
+- **Intent = Linked Thoughts** (business rules, constraints, design decisions)
 
-# Result (JSON):
-{
-  "node": "ProcessPayment",
-  "constraint": "MUST be idempotent (Stripe Req)",
-  "dependency": "UserDB (Status: STALE - Changed 1hr ago)",
-  "risk": "High - Affects Checkout Flow"
-}
+Agents can now **intuitively navigate and query** this structure:
 
 ```
+Agent: "Why does process_payment need to be idempotent?"
 
-### 3. 🧠 The "Hive Mind" (Git Integration)
+ShadowGraph:
+  └─ Finds: function:payment.process_payment
+  └─ Returns: Linked thought: "Stripe webhook can retry. Must be safe."
+  └─ Also returns: Business rule: "Payments are always national DPD shipments from Berlin hub"
+  └─ Total tokens: ~100 (vs. 5000 for reading 20 files)
+```
 
-Your thoughts are saved in `.shadow/graph.jsonl`.
+**The Benefit:** Agents can recall *exactly what they need* without hallucinating or bloating the context window.
 
-* Commit them to Git.
-* Teammates pull the repo and **instantly inherit your context**.
-* Zero onboarding time.
+---
 
-### 4. 🛡️ Semantic CI
+## ✨ How It Works
 
-Run `shadow-check` in your CI pipeline. If you modify code that has a `CRITICAL` constraint attached without updating the graph, the build fails.
+### 1. **Semantic Storage** — Not Line Numbers
+- Thoughts are anchored to code via **AST hashes**, not line numbers
+- Move a function → the thought moves with it
+- Rename a class → the thought still finds it
+- Change the logic → the thought is marked **STALE** and the agent is warned
 
-> *"You changed the Auth Logic but ignored the 'Security Audit' constraint. Please update the graph."*
+### 2. **The 5 Essential Tools**
+
+- **`remember(topic, context, file_path?, symbol_name?)`** — Save business rules, design decisions, constraints
+- **`recall(query)`** — Query what you know about a symbol, business rule, or topic
+- **`index(file_path)`** — Parse a file and register its symbols in the graph
+- **`check(file_path?)`** — Detect stale thoughts when code changes
+- **`create_file(path, content)`** — Write code to disk AND auto-register it in the graph
+- **`debug_info()`** — Diagnostic info for troubleshooting
+
+Simple, intentional verbs. No confusion.
+
+### 3. **Team Knowledge** — Git-Tracked Thoughts
+Thoughts are saved in `.shadow/graph.jsonl`:
+- Commit them to Git alongside your code
+- Teammates pull and **instantly inherit your context**
+- No onboarding questions. The knowledge lives in the repo.
 
 ---
 
 ## 🚀 Getting Started
 
-### Installation
+### Install
+```bash
+# Install from VS Code Marketplace
+# (or build from source: npm run build)
+```
 
-1. Install the **ShadowGraph** extension from the VS Code Marketplace.
-2. The internal MCP Server will start automatically.
+### Quick Example
 
-### Usage with AI Agents (Cursor, Windsurf, Copilot)
+```python
+# Agent saves business knowledge
+remember("shipping", "All shipments are national DPD from our Berlin hub. Tracking: 123.22.123.1:7534/parcels")
 
-**1. Index your workspace:**
+# Agent indexes a new file they wrote
+index("src/shipping/parcel_tracker.py")
 
-> "ShadowGraph: Index this codebase."
+# Agent recalls context before making changes
+recall("shipping")
+# Returns: Business rule about DPD + Berlin hub + tracking API
 
-**2. Add a Thought:**
-Highlight code and ask your Agent:
+# Agent modifies code and re-indexes
+# ... code changes ...
+index("src/shipping/parcel_tracker.py")
 
-> "Attach a thought to this block: 'We use a spinlock here because the thread scheduler is unreliable on Windows.'"
-
-**3. Debug with Superpowers:**
-
-> "Why is the `Login` function failing? Check the ShadowGraph for recent dependency changes."
-
----
-
-## 🔬 The Architecture
-
-* **Frontend:** VS Code Extension (TypeScript)
-* **Backend:** Local Python MCP Server
-* **Storage:** SQLite (Graph) + sqlite-vec (Vector Search)
-* **Parsing:** Tree-sitter (Multi-language support)
-
-## 🤝 Contributing
-
-ShadowGraph is open-source. We are building the standard protocol for Code-Intent Mapping.
-[Link to Contributing Guide]
+# Agent checks for stale thoughts
+check("src/shipping/parcel_tracker.py")
+# Returns: "All anchors valid, no stale thoughts"
+```
 
 ---
 
-*Built for the Age of Agents.*
+## 🎯 Why This Matters for Agent-Driven Development
+
+**Traditional Workflow:**
+- Agent reads 50 files → 10k tokens just for context
+- Agent guesses at design intent → introduces bugs
+- Next session, agent forgets everything → repeat
+
+**ShadowGraph Workflow:**
+- Agent queries graph for 1 symbol → 200 tokens of exact context
+- Agent understands *why* code exists → makes intelligent changes
+- Graph persists across sessions → agent remembers everything
+
+**Cost: ~5% of the context tokens. Knowledge that doesn't disappear.**
+
+---
+
+## 🔬 Architecture
+
+- **Extension:** VS Code (TypeScript) — displays codelens, decorations, commands
+- **MCP Server:** Python (FastMCP) — parses code, manages graph, serves queries
+- **Storage:** SQLite — local, portable, easy to version control
+- **Parsing:** tree-sitter — multi-language AST support (Python, TypeScript, JS, Go, Rust, etc.)
+
+---
+
+## License
+
+MIT. Use this in your projects, in teams, in AI workflows. The code is yours.
+
+---
+
+**Built for environments where agents maintain and evolve codebases over weeks or months.**
+*Where context is everything, and tokens are expensive.*
 
 
