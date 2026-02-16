@@ -17,6 +17,34 @@ class ShadowDB:
         schema_path = Path(__file__).parent / "schema.sql"
         self.conn.executescript(schema_path.read_text())
 
+        # Migration: Add missing columns if they don't exist
+        self._apply_migrations()
+
+    def _apply_migrations(self) -> None:
+        """Apply schema migrations for existing databases."""
+        cursor = self.conn.execute("PRAGMA table_info(nodes)")
+        columns = {row[1] for row in cursor.fetchall()}
+
+        # Add path column if missing
+        if "path" not in columns:
+            try:
+                self.conn.execute("ALTER TABLE nodes ADD COLUMN path TEXT")
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+        # Add indexes if they don't exist (safe due to IF NOT EXISTS)
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type)",
+            "CREATE INDEX IF NOT EXISTS idx_nodes_path ON nodes(path)",
+        ]
+        for index_sql in indexes:
+            try:
+                self.conn.execute(index_sql)
+                self.conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Index already exists
+
     def upsert_node(self, node_id: str, node_type: str, content: str, path: str = None) -> None:
         self.conn.execute(
             "INSERT OR REPLACE INTO nodes (id, type, content, path) VALUES (?, ?, ?, ?)",
