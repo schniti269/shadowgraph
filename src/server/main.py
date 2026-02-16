@@ -10,7 +10,6 @@ logging.basicConfig(stream=sys.stderr, level=logging.DEBUG)
 logger = logging.getLogger("shadowgraph")
 
 logger.info("=== ShadowGraph MCP Server Starting ===")
-logger.info(f"Database path: {os.environ.get('SHADOW_DB_PATH', '.vscode/shadow.db')}")
 logger.info(f"Python version: {sys.version.split()[0]}")
 
 # Use absolute imports so the script works both as `python main.py` and `python -m src.server.main`
@@ -18,14 +17,14 @@ sys.path.insert(0, os.path.dirname(__file__))
 from database import ShadowDB  # noqa: E402
 from indexer import index_file as do_index_file, extract_imports  # noqa: E402
 from drift import check_drift as do_check_drift  # noqa: E402
-from serializer import serialize_database  # noqa: E402
-from constraints import ConstraintValidator  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
-# Initialize database
+# ============================================================================
+# Database initialisation
 # Priority: --db-path CLI arg > SHADOW_DB_PATH env var > default
-# CLI arg is used because McpStdioServerDefinition may not forward env vars on all platforms.
+# CLI arg is used because McpStdioServerDefinition may not forward env vars.
+# ============================================================================
 _db_path_from_arg = None
 if "--db-path" in sys.argv:
     _idx = sys.argv.index("--db-path")
@@ -33,74 +32,269 @@ if "--db-path" in sys.argv:
         _db_path_from_arg = sys.argv[_idx + 1]
 
 db_path = _db_path_from_arg or os.environ.get("SHADOW_DB_PATH", ".vscode/shadow.db")
-logger.info(f"Initializing database at: {db_path} (source: {'--db-path arg' if _db_path_from_arg else 'env/default'})")
-logger.info(f"Absolute path: {os.path.abspath(db_path)}")
-logger.info(f"Current working directory: {os.getcwd()}")
+logger.info(f"DB path: {db_path} (source: {'--db-path arg' if _db_path_from_arg else 'env/default'})")
 
-# Derive workspace root from SHADOW_DB_PATH: it's always {workspace}/.vscode/shadow.db
-# This is the single source of truth — never rely on os.getcwd() which may be wrong.
+# Workspace root is always two levels above shadow.db: {workspace}/.vscode/shadow.db
 _abs_db_path = os.path.abspath(db_path)
 WORKSPACE_ROOT = os.path.dirname(os.path.dirname(_abs_db_path))
-logger.info(f"Workspace root (derived from SHADOW_DB_PATH): {WORKSPACE_ROOT}")
+logger.info(f"Workspace root: {WORKSPACE_ROOT}")
+logger.info(f"cwd: {os.getcwd()}")
 
 try:
-    # Always use the absolute path so the DB is created in the right place
-    # regardless of what cwd the MCP server process happens to start with.
     db = ShadowDB(_abs_db_path)
     db.connect()
-    logger.info(f"Database connected successfully at: {_abs_db_path}")
+    logger.info(f"Database connected at: {_abs_db_path}")
 except Exception as e:
-    logger.error(f"CRITICAL: Failed to initialize database: {e}", exc_info=True)
+    logger.error(f"CRITICAL: Failed to connect to database: {e}", exc_info=True)
     raise
 
 mcp = FastMCP("ShadowGraph")
 
 
-def _resolve_path(path: str) -> str:
-    """Resolve a path (relative or absolute) to an absolute path.
+# ============================================================================
+# Path helpers
+# ============================================================================
 
-    Relative paths are resolved relative to WORKSPACE_ROOT, not os.getcwd().
-    This is critical because the MCP server's cwd may not be the workspace root.
-    """
+def _resolve_path(path: str) -> str:
+    """Absolute path — relative paths go relative to WORKSPACE_ROOT, not cwd."""
     if os.path.isabs(path):
         return path
     return os.path.join(WORKSPACE_ROOT, path)
 
 
 def _to_rel_path(path: str) -> str:
-    """Convert any path to a forward-slash relative path from WORKSPACE_ROOT.
-
-    This is the canonical form stored in the DB and used for all node IDs.
-    Always use this instead of os.path.relpath() directly.
-    """
+    """Forward-slash path relative to WORKSPACE_ROOT. This is what gets stored in the DB."""
     abs_path = _resolve_path(path)
     try:
         rel = os.path.relpath(abs_path, WORKSPACE_ROOT)
     except ValueError:
-        # On Windows, relpath raises ValueError if paths are on different drives
-        rel = abs_path
+        rel = abs_path  # Different drive on Windows
     return rel.replace("\\", "/")
 
 
+# ============================================================================
+# THE 5 TOOLS
+# ============================================================================
+
 @mcp.tool()
-def index_file(file_path: str) -> str:
-    """Index a source file's functions and classes into the ShadowGraph database.
+def remember(
+    topic: str,
+    context: str,
+    file_path: str = None,
+    symbol_name: str = None,
+) -> str:
+    """Save knowledge to the graph — WHY code exists, business rules, design decisions.
 
-    Parses the file using tree-sitter, identifies all top-level functions and classes,
-    computes stable AST hashes (ignoring whitespace), and stores them as CODE_BLOCK
-    nodes with anchors in the database.
+    *** THIS TOOL DOES NOT CREATE OR EDIT ANY FILES. ***
+    Use create_file() to write code to disk.
 
-    Also extracts import statements and creates DEPENDS_ON edges to imported modules.
+    This is the single tool for storing ALL knowledge:
+
+    EXAMPLES:
+    - Business rule:   remember("shipping", "Always DPD, national only, hub in Berlin")
+    - Design decision: remember("why retry", "Added retry to handle flaky payment gateway",
+                                file_path="payments.py", symbol_name="function:charge")
+    - Before editing:  remember("refactor auth", "Splitting into two functions for testability",
+                                file_path="auth.py", symbol_name="class:AuthService")
+    - Domain fact:     remember("tracking-api", "Parcel tracking at http://123.22.123.1:7534/parcels")
 
     Args:
-        file_path: Absolute path to the source file to index.
+        topic:       Short label for this knowledge (e.g. "why-retry", "pricing-rule", "parcel-api")
+        context:     The full explanation. Be specific — include business reason, not just technical what.
+        file_path:   Optional. Relative path to a source file to link this to (e.g. "crm/models.py").
+        symbol_name: Optional. Symbol in the file to link to (e.g. "function:charge", "class:Customer").
+                     Call recall() with no args first to see available symbols if unsure.
 
     Returns:
-        JSON summary of indexed symbols.
+        JSON confirmation. Knowledge is now in the graph for future agents and humans.
     """
-    logger.debug(f"index_file() called with: {file_path}")
-    symbols = do_index_file(file_path)
-    relative_path = _to_rel_path(file_path)
+    logger.debug(f"remember() topic={topic}, file={file_path}, symbol={symbol_name}")
+
+    thought_id = f"thought:{uuid.uuid4().hex[:12]}"
+    created_at = datetime.datetime.utcnow().isoformat()
+
+    # Store the thought
+    db.upsert_node(thought_id, "THOUGHT", context)
+
+    # Link to a code symbol if given
+    linked_to = None
+    if file_path and symbol_name:
+        normalized_path = _to_rel_path(file_path)
+        code_node_id = f"code:{normalized_path}:{symbol_name}"
+        try:
+            db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
+            linked_to = code_node_id
+            logger.info(f"Linked thought to {code_node_id}")
+        except Exception as e:
+            if "FOREIGN KEY" in str(e):
+                # Symbol not indexed yet — store business context anyway and warn
+                logger.warning(f"Symbol {code_node_id} not indexed yet. Storing thought unlinked.")
+                linked_to = f"(unlinked — call index({file_path!r}) first to anchor)"
+            else:
+                raise
+
+    # Always link to the project business context node for global recall
+    project_node_id = "project:business-context"
+    db.upsert_node(project_node_id, "CODE_BLOCK", "Project-level business context and domain knowledge")
+    topic_node_id = f"business:{topic.lower().replace(' ', '-')}"
+    db.upsert_node(topic_node_id, "THOUGHT", f"[{topic}] {context}")
+    try:
+        db.add_edge(project_node_id, topic_node_id, "HAS_THOUGHT")
+        if linked_to and not linked_to.startswith("(unlinked"):
+            db.add_edge(linked_to, topic_node_id, "HAS_THOUGHT")
+    except Exception:
+        pass
+
+    return json.dumps({
+        "status": "ok",
+        "thought_id": thought_id,
+        "topic": topic,
+        "linked_to": linked_to,
+        "created_at": created_at,
+    })
+
+
+@mcp.tool()
+def recall(query: str = "") -> str:
+    """Retrieve knowledge from the graph — code context, thoughts, business rules.
+
+    The single tool for reading ALL knowledge. Use it to understand WHY code
+    exists before touching it, and to look up business rules.
+
+    EXAMPLES:
+    - recall()                   → all business context + recently indexed symbols
+    - recall("parcels")          → everything about parcels (code + business rules)
+    - recall("function:charge")  → the charge function's code + all linked thoughts
+    - recall("crm/models.py")    → all symbols and thoughts in that file
+
+    Args:
+        query: What to look up. Can be:
+               - Empty / "*"          → all business context + symbol list
+               - A symbol name        → "function:charge", "class:Customer"
+               - A file path          → "crm/models.py"
+               - Any keyword          → searches across all stored knowledge
+
+    Returns:
+        JSON with matching code, thoughts, and business context.
+    """
+    logger.debug(f"recall() query={query!r}")
+    q = query.strip()
+
+    results = {
+        "query": q or "*",
+        "business_context": [],
+        "symbols": [],
+        "thoughts": [],
+    }
+
+    if not q or q == "*":
+        # Return ALL business context + list of indexed symbols
+        biz_cursor = db.conn.execute(
+            """
+            SELECT n.id, n.content, n.created_at FROM nodes n
+            WHERE (n.id LIKE 'business:%' OR n.id LIKE 'thought:%')
+              AND n.type = 'THOUGHT'
+              AND n.id IN (SELECT target_id FROM edges WHERE source_id = 'project:business-context')
+            ORDER BY n.created_at DESC
+            """
+        )
+        results["business_context"] = [
+            {"id": dict(r)["id"], "text": dict(r)["content"]}
+            for r in biz_cursor.fetchall()
+        ]
+
+        sym_cursor = db.conn.execute(
+            """
+            SELECT id FROM nodes
+            WHERE type = 'CODE_BLOCK' AND id LIKE 'code:%:%'
+            ORDER BY created_at DESC LIMIT 30
+            """
+        )
+        results["symbols"] = [dict(r)["id"].split(":", 2)[2] + " (" + dict(r)["id"] + ")"
+                              for r in sym_cursor.fetchall()]
+        results["tip"] = "Pass a symbol name or keyword to recall() to get full details."
+        return json.dumps(results)
+
+    # Try exact code node match first
+    exact_id = None
+    if q.startswith("code:"):
+        exact_id = q
+    else:
+        # Try as a symbol: code:{file}:{q}
+        row = db.conn.execute(
+            "SELECT id FROM nodes WHERE id LIKE ? AND type='CODE_BLOCK' LIMIT 1",
+            (f"code:%:{q}",)
+        ).fetchone()
+        if row:
+            exact_id = dict(row)["id"]
+
+    if exact_id:
+        node = db.get_node(exact_id)
+        if node:
+            results["symbols"] = [{
+                "node_id": exact_id,
+                "code": node["content"],
+            }]
+            thoughts = db.conn.execute(
+                """
+                SELECT n.id, n.content, n.created_at FROM nodes n
+                JOIN edges e ON e.target_id = n.id
+                WHERE e.source_id = ? AND n.type = 'THOUGHT'
+                ORDER BY n.created_at DESC
+                """,
+                (exact_id,)
+            ).fetchall()
+            results["thoughts"] = [{"id": dict(t)["id"], "text": dict(t)["content"]} for t in thoughts]
+            if not results["thoughts"]:
+                results["tip"] = f"No thoughts linked yet. Use remember(topic, context, file_path, symbol_name) to add context."
+            return json.dumps(results)
+
+    # Keyword search: match node IDs and content
+    like = f"%{q}%"
+    code_rows = db.conn.execute(
+        "SELECT id, content FROM nodes WHERE type='CODE_BLOCK' AND (id LIKE ? OR content LIKE ?) LIMIT 10",
+        (like, like)
+    ).fetchall()
+    results["symbols"] = [{"node_id": dict(r)["id"], "snippet": (dict(r)["content"] or "")[:120]} for r in code_rows]
+
+    thought_rows = db.conn.execute(
+        "SELECT id, content FROM nodes WHERE type='THOUGHT' AND content LIKE ? LIMIT 10",
+        (like,)
+    ).fetchall()
+    results["thoughts"] = [{"id": dict(r)["id"], "text": dict(r)["content"]} for r in thought_rows]
+
+    biz_rows = db.conn.execute(
+        "SELECT id, content FROM nodes WHERE id LIKE 'business:%' AND (id LIKE ? OR content LIKE ?) LIMIT 5",
+        (like, like)
+    ).fetchall()
+    results["business_context"] = [{"id": dict(r)["id"], "text": dict(r)["content"]} for r in biz_rows]
+
+    if not results["symbols"] and not results["thoughts"] and not results["business_context"]:
+        results["tip"] = f"Nothing found for '{q}'. Try recall() with no args to see everything that's indexed."
+
+    return json.dumps(results)
+
+
+@mcp.tool()
+def index(file_path: str) -> str:
+    """Parse a source file and store all its symbols (functions, classes) in the graph.
+
+    Call this:
+    - After creating a new file with create_file()
+    - After editing an existing file
+    - On any file before calling remember() with a symbol_name from it
+
+    Args:
+        file_path: Path to the source file (absolute or relative to project root).
+                   Supports Python and TypeScript/JavaScript.
+
+    Returns:
+        JSON with the list of symbols now indexed (use these names in remember() and recall()).
+    """
+    logger.debug(f"index() called with: {file_path}")
+    abs_path = _resolve_path(file_path)
+    symbols = do_index_file(abs_path)
+    relative_path = _to_rel_path(abs_path)
     logger.info(f"Indexed {len(symbols)} symbols from {relative_path}")
 
     for sym in symbols:
@@ -116,998 +310,152 @@ def index_file(file_path: str) -> str:
 
     # Extract imports and create DEPENDS_ON edges
     try:
-        imports = extract_imports(file_path)
+        imports = extract_imports(abs_path)
         for imp in imports:
-            # Create a dependency node for the imported module
             import_node_id = f"module:{imp}"
             db.upsert_node(import_node_id, "CODE_BLOCK", f"External module: {imp}")
-
-            # Link each symbol in this file to the imported module
             file_node_id = f"file:{relative_path}"
             db.upsert_node(file_node_id, "CODE_BLOCK", f"File: {relative_path}")
             db.add_edge(file_node_id, import_node_id, "DEPENDS_ON")
-
-        if imports:
-            logger.info(f"Extracted {len(imports)} import dependencies from {relative_path}")
     except Exception as e:
-        logger.warning(f"Failed to extract imports from {file_path}: {e}")
+        logger.warning(f"Failed to extract imports: {e}")
 
-    return json.dumps(
-        {
-            "status": "ok",
-            "file": relative_path,
-            "symbols_indexed": len(symbols),
-            "symbols": [s["symbol_name"] for s in symbols],
-        }
-    )
-
-
-@mcp.tool()
-def add_thought(file_path: str, symbol_name: str, thought_text: str) -> str:
-    """Add a thought or note linked to a specific function or class.
-
-    The thought is stored as a THOUGHT node in the graph, connected via an
-    edge to the CODE_BLOCK node identified by file_path and symbol_name.
-    The symbol must have been previously indexed with index_file.
-
-    Args:
-        file_path: Relative path to the source file (as stored in the DB).
-        symbol_name: Symbol identifier, e.g., "function:login" or "class:AuthService".
-        thought_text: The thought, note, or requirement text to attach.
-
-    Returns:
-        JSON confirmation with the thought ID and timestamp.
-    """
-    logger.debug(f"add_thought() called for {file_path}:{symbol_name}")
-    normalized_path = _to_rel_path(file_path)
-    code_node_id = f"code:{normalized_path}:{symbol_name}"
-    thought_id = f"thought:{uuid.uuid4().hex[:12]}"
-    created_at = datetime.datetime.utcnow().isoformat()
-
-    db.upsert_node(thought_id, "THOUGHT", thought_text)
-    try:
-        db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
-        logger.info(f"Thought created: {thought_id} for {code_node_id}")
-    except Exception as e:
-        if "FOREIGN KEY" in str(e):
-            logger.error(f"Code node not found: {code_node_id}. Index the file first.")
-            return json.dumps({
-                "status": "error",
-                "message": f"Code node not found: {code_node_id}. File must be indexed before adding thoughts."
-            })
-        raise
-
-    return json.dumps(
-        {
-            "status": "ok",
-            "thought_id": thought_id,
-            "linked_to": code_node_id,
-            "created_at": created_at,
-        }
-    )
+    symbol_names = [s["symbol_name"] for s in symbols]
+    return json.dumps({
+        "status": "ok",
+        "file": relative_path,
+        "symbols_indexed": len(symbols),
+        "symbols": symbol_names,
+        "tip": f"Use these symbol names with remember() and recall(), e.g. recall('{symbol_names[0]}')" if symbol_names else "No symbols found (empty file or unsupported language).",
+    })
 
 
 @mcp.tool()
-def get_context(file_path: str, symbol_name: str) -> str:
-    """Get the full context for a symbol: its source code plus all linked thoughts.
+def check(file_path: str = None) -> str:
+    """Check for stale thoughts — symbols whose code changed after thoughts were written.
 
-    Useful for an AI agent to understand not just the code, but the developer's
-    reasoning, requirements, and notes associated with a symbol.
+    When code changes but its linked thoughts aren't updated, they become stale.
+    Call this after editing files to see what context might be out of date.
 
     Args:
-        file_path: Relative path to the source file.
-        symbol_name: Symbol identifier, e.g., "function:login".
+        file_path: Optional. Path to a specific file to check.
+                   Leave empty to check all recently modified files.
 
     Returns:
-        JSON object with code content and all linked thoughts.
+        JSON with list of stale symbols and the thoughts that need reviewing.
     """
-    normalized_path = _to_rel_path(file_path)
-    code_node_id = f"code:{normalized_path}:{symbol_name}"
+    logger.debug(f"check() called, file_path={file_path}")
 
-    code_node = db.get_node(code_node_id)
-    code_content = code_node["content"] if code_node else None
+    if file_path:
+        abs_path = _resolve_path(file_path)
+        stale = do_check_drift(db, abs_path)
+        files_checked = [_to_rel_path(abs_path)]
+    else:
+        # Check all anchored files
+        cursor = db.conn.execute("SELECT DISTINCT file_path FROM anchors")
+        files_checked = []
+        stale = []
+        for row in cursor.fetchall():
+            fp = dict(row)["file_path"]
+            abs_fp = _resolve_path(fp)
+            if os.path.exists(abs_fp):
+                files_checked.append(fp)
+                try:
+                    stale.extend(do_check_drift(db, abs_fp))
+                except Exception as e:
+                    logger.warning(f"check drift failed for {fp}: {e}")
 
-    thoughts = db.get_thoughts_for_symbol(normalized_path, symbol_name)
-
-    return json.dumps(
-        {
-            "symbol": symbol_name,
-            "file": file_path,
-            "code": code_content,
-            "thoughts": [{"id": t["id"], "text": t["content"]} for t in thoughts],
-        }
-    )
+    return json.dumps({
+        "status": "ok",
+        "files_checked": files_checked,
+        "stale_count": len(stale),
+        "stale_symbols": stale,
+        "tip": "For each stale symbol, call remember() to update the linked context." if stale else "All thoughts are current.",
+    })
 
 
 @mcp.tool()
-def check_drift(file_path: str) -> str:
-    """Compare current AST hashes with stored hashes to detect stale notes.
+def create_file(path: str, content: str, language: str = "python") -> str:
+    """Create a new file on disk and index its symbols into the graph.
 
-    Identifies functions or classes that have been modified or deleted since
-    they were last indexed. Linked thoughts on modified symbols become 'stale'.
+    *** THIS IS THE ONLY TOOL THAT WRITES FILES. ***
+    remember(), recall(), index(), and check() do NOT touch the filesystem.
 
-    Args:
-        file_path: Absolute path to the source file to check.
-
-    Returns:
-        JSON list of stale symbols with details.
-    """
-    stale = do_check_drift(db, file_path)
-    return json.dumps(
-        {
-            "file": file_path,
-            "stale_count": len(stale),
-            "stale_symbols": stale,
-        }
-    )
-
-
-@mcp.tool()
-def edit_code_with_thought(
-    file_path: str,
-    symbol_name: str,
-    thought_text: str,
-    new_code: str = ""
-) -> str:
-    """Edit code while attaching a thought explaining the change.
-
-    This is the recommended way to make code changes when using ShadowGraph.
-    By attaching a thought BEFORE making edits, you leave a clear record of
-    your reasoning for future developers (and your future self).
-
-    WORKFLOW:
-    1. Call this tool FIRST with your explanation of the change
-    2. Then use file editing tools to apply the new code
-    3. Finally, call index_file() to update the database
+    After creating the file, its symbols are automatically indexed so you can
+    immediately use remember() to attach thoughts to them.
 
     Args:
-        file_path: Relative path to the source file.
-        symbol_name: Symbol being edited (e.g., "function:login" or "class:AuthService").
-        thought_text: Clear explanation of WHY you're making this change.
-        new_code: Optional: the new code (for reference only, actual editing is separate).
+        path:     File path (absolute, or relative to project root).
+                  e.g. "crm/parcel_tracking.py" or "C:/project/src/auth.py"
+        content:  The full file content to write.
+        language: "python", "typescript", "javascript" (default: "python").
+                  Used to determine which symbols to index.
 
     Returns:
-        JSON confirmation with thought ID. You may now edit the code.
-    """
-    logger.debug(f"edit_code_with_thought() called for {file_path}:{symbol_name}")
-    normalized_path = _to_rel_path(file_path)
-    code_node_id = f"code:{normalized_path}:{symbol_name}"
-    thought_id = f"thought:{uuid.uuid4().hex[:12]}"
-    created_at = datetime.datetime.utcnow().isoformat()
-
-    db.upsert_node(thought_id, "THOUGHT", thought_text)
-    try:
-        db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
-        logger.info(f"Edit thought created: {thought_id} for {code_node_id}")
-    except Exception as e:
-        if "FOREIGN KEY" in str(e):
-            logger.warning(f"Code node not found: {code_node_id}. Will create thought anyway (node may not be indexed yet).")
-        else:
-            raise
-
-    return json.dumps(
-        {
-            "status": "ok",
-            "thought_id": thought_id,
-            "code_node_id": code_node_id,
-            "created_at": created_at,
-            "message": "Thought recorded. You may now edit the code with your preferred tool.",
-            "next_steps": [
-                "1. Edit the code using file tools",
-                "2. Call index_file() to update the database",
-                "3. Call check_drift() if you modified multiple symbols"
-            ]
-        }
-    )
-
-
-@mcp.tool()
-def query_blast_radius(symbol_name: str, depth: int = 2) -> str:
-    """Query the blast radius of a symbol: what could break if I change this?
-
-    Recursively retrieves:
-    1. Dependencies (outgoing): What does this symbol depend on? What breaks if those change?
-    2. Dependents (incoming): Who depends on me? What breaks if I change?
-    3. Constraints: What rules apply to this symbol?
-    4. Thoughts: What developer notes are attached?
-
-    This is the primary tool for agents to understand impact before making changes.
-
-    Args:
-        symbol_name: Symbol identifier, e.g., "function:charge" or "class:PaymentService".
-        depth: How many hops to follow (default 2). Higher depth = broader context.
-
-    Returns:
-        JSON with blast radius graph including dependencies, dependents, constraints, and thoughts.
-    """
-    logger.debug(f"query_blast_radius() called for {symbol_name} at depth {depth}")
-
-    # Query database using recursive approach
-    conn = db.conn
-    conn.row_factory = None  # Use tuple rows for recursive query
-
-    # Recursive CTE to find all reachable nodes (up to depth hops)
-    query = """
-    WITH RECURSIVE blast(node_id, distance, direction) AS (
-        -- Start: find the target node by symbol_name pattern
-        SELECT n.id, 0, 'root'
-        FROM nodes n
-        WHERE n.id LIKE ?
-
-        UNION ALL
-
-        -- Outgoing: what does this depend on?
-        SELECT e.target_id, b.distance + 1, 'depends_on'
-        FROM blast b
-        JOIN edges e ON e.source_id = b.node_id
-        WHERE b.distance < ? AND e.relation IN ('DEPENDS_ON', 'HAS_THOUGHT')
-
-        UNION ALL
-
-        -- Incoming: who depends on this?
-        SELECT e.source_id, b.distance + 1, 'depended_by'
-        FROM blast b
-        JOIN edges e ON e.target_id = b.node_id
-        WHERE b.distance < ? AND e.relation IN ('DEPENDS_ON', 'REQUIRED_BY')
-    )
-    SELECT DISTINCT b.node_id, b.distance, b.direction, n.type, n.content
-    FROM blast b
-    JOIN nodes n ON n.id = b.node_id
-    ORDER BY b.distance, b.direction, b.node_id
-    """
-
-    # Find root node by symbol name pattern
-    pattern = f"%:{symbol_name}" if ":" not in symbol_name else f"%{symbol_name}%"
-
-    cursor = conn.execute(query, (pattern, depth, depth))
-    results = cursor.fetchall()
-
-    # Format results
-    dependencies = []
-    dependents = []
-    root_thoughts = []
-
-    for node_id, distance, direction, node_type, content in results:
-        if distance == 0:
-            # This is the root node we're analyzing
-            root_node = {
-                "id": node_id,
-                "type": node_type,
-                "content": content[:200] if content else None,  # Snippet
-            }
-        elif direction == "depends_on" and node_type != "THOUGHT":
-            dependencies.append({
-                "id": node_id,
-                "type": node_type,
-                "distance": distance,
-                "content": content[:100] if content else None,
-            })
-        elif direction == "depends_on" and node_type == "THOUGHT":
-            root_thoughts.append({
-                "id": node_id,
-                "text": content,
-            })
-        elif direction in ("depended_by", "root") and node_type != "THOUGHT":
-            dependents.append({
-                "id": node_id,
-                "type": node_type,
-                "distance": distance,
-                "content": content[:100] if content else None,
-            })
-
-    logger.info(f"Blast radius for {symbol_name}: {len(dependencies)} deps, {len(dependents)} dependents")
-
-    return json.dumps(
-        {
-            "symbol": symbol_name,
-            "depth": depth,
-            "root": root_node if results else None,
-            "dependencies": dependencies,
-            "dependents": dependents,
-            "thoughts": root_thoughts,
-            "summary": f"Found {len(dependencies)} dependencies, {len(dependents)} dependents at depth {depth}",
-        }
-    )
-
-
-@mcp.tool()
-def serialize_graph(output_path: str = ".shadow/graph.jsonl") -> str:
-    """Export the semantic graph to JSONL format for git tracking.
-
-    Creates a `.shadow/graph.jsonl` file with all nodes, anchors, and edges
-    in JSONL format (one JSON object per line). This file is designed to be:
-    - Diffable (line-based diffs)
-    - Mergeable (timestamps prevent conflicts)
-    - Git-trackable (human readable)
-    - Loadable back into the database via deserialize_graph()
-
-    Args:
-        output_path: Where to write the JSONL file (default: .shadow/graph.jsonl).
-
-    Returns:
-        JSON confirmation with file size and item counts.
-    """
-    logger.debug(f"serialize_graph() called, output to {output_path}")
-
-    # Create .shadow directory if needed
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-
-    serialize_database(_abs_db_path, output_path)
-
-    # Count items
-    conn = db.conn
-    node_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
-    anchor_count = conn.execute("SELECT COUNT(*) FROM anchors").fetchone()[0]
-    edge_count = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
-
-    file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
-
-    logger.info(f"Graph serialized to {output_path}: {node_count} nodes, {anchor_count} anchors, {edge_count} edges")
-
-    return json.dumps(
-        {
-            "status": "ok",
-            "output_path": output_path,
-            "file_size_bytes": file_size,
-            "nodes": node_count,
-            "anchors": anchor_count,
-            "edges": edge_count,
-            "message": f"Graph exported. Commit {output_path} to git to share with your team.",
-        }
-    )
-
-
-@mcp.tool()
-def add_constraint(
-    file_path: str,
-    symbol_name: str,
-    rule_text: str,
-    constraint_type: str = "RULE",
-    severity: str = "warning",
-) -> str:
-    """Add a semantic constraint to a symbol.
-
-    Constraints are rules that code must follow:
-    - RULE: General requirement (e.g., "Payments must be idempotent")
-    - FORBIDDEN: Patterns to avoid (e.g., "Do not use Math.random()")
-    - REQUIRED_PATTERN: Code must match pattern
-    - REQUIRES_EDGE: Relationship required
-
-    Args:
-        file_path: Relative path to the source file.
-        symbol_name: Symbol to constrain (e.g., "function:charge").
-        rule_text: The constraint description.
-        constraint_type: Type: RULE, FORBIDDEN, REQUIRED_PATTERN, REQUIRES_EDGE.
-        severity: warning, error, critical.
-
-    Returns:
-        JSON confirmation with constraint ID.
-    """
-    logger.debug(f"add_constraint() called for {file_path}:{symbol_name}")
-    validator = ConstraintValidator(db)
-
-    try:
-        constraint_id = validator.add_constraint(
-            symbol_name, file_path, rule_text, constraint_type, severity
-        )
-        logger.info(f"Constraint added: {constraint_id}")
-
-        return json.dumps(
-            {
-                "status": "ok",
-                "constraint_id": constraint_id,
-                "symbol": symbol_name,
-                "severity": severity,
-            }
-        )
-    except Exception as e:
-        logger.error(f"Failed to add constraint: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
-
-
-@mcp.tool()
-def add_new_code_with_thoughts(
-    file_path: str,
-    symbol_name: str,
-    new_code: str,
-    design_rationale: str,
-    constraints: list[str] = None,
-) -> str:
-    """Create new code with semantic intent attached BEFORE writing to disk.
-
-    This is the RECOMMENDED workflow for agents creating new functionality:
-    1. Agent decides to ADD a new function/class
-    2. Agent calls this tool with code + WHY (design rationale)
-    3. This creates database entries with semantic intent
-    4. Agent then writes the actual code file
-    5. Agent calls index_file() to anchor the code to AST hashes
-
-    This ensures thoughts exist BEFORE code is written, capturing the agent's
-    reasoning for future developers and subsequent agent sessions.
-
-    Args:
-        file_path: Relative path where code will be written (e.g., "payment.py").
-        symbol_name: The symbol being created (e.g., "function:charge_with_retry").
-        new_code: The source code being added (for reference/validation).
-        design_rationale: WHY this code is being added (design decisions, trade-offs).
-        constraints: List of constraints this code must satisfy (optional).
-
-    Returns:
-        JSON with code_node_id, thoughts recorded, ready for file write.
-    """
-    logger.debug(f"add_new_code_with_thoughts() called for {file_path}:{symbol_name}")
-
-    # Create code node BEFORE file exists (code node ID format: code:{relpath}:{symbol_name})
-    code_node_id = f"code:{file_path}:{symbol_name}"
-    db.upsert_node(code_node_id, "CODE_BLOCK", new_code)
-
-    # Record the design rationale as a thought
-    thought_id = f"thought:{uuid.uuid4().hex[:12]}"
-    db.upsert_node(thought_id, "THOUGHT", f"Design: {design_rationale}")
-    db.add_edge(code_node_id, thought_id, "HAS_THOUGHT")
-
-    logger.info(f"Pre-created code node: {code_node_id} with design rationale")
-
-    # Add constraints if provided
-    constraint_ids = []
-    if constraints:
-        validator = ConstraintValidator(db)
-        for constraint_rule in constraints:
-            try:
-                cid = validator.add_constraint(
-                    symbol_name,
-                    file_path,
-                    constraint_rule,
-                    "RULE",
-                    "critical"
-                )
-                constraint_ids.append(cid)
-            except Exception as e:
-                logger.warning(f"Failed to add constraint: {e}")
-
-    created_at = datetime.datetime.utcnow().isoformat()
-
-    return json.dumps(
-        {
-            "status": "ok",
-            "code_node_id": code_node_id,
-            "thought_id": thought_id,
-            "constraints_added": len(constraint_ids),
-            "created_at": created_at,
-            "message": "Code node created with semantic intent. You may now: (1) Write the file, (2) Call index_file() to anchor with AST hash.",
-            "next_steps": [
-                "1. Write the code to disk (e.g., with file tools)",
-                "2. Call index_file() to anchor this code to AST hash",
-                "3. Thoughts will be automatically linked to the indexed symbol"
-            ]
-        }
-    )
-
-
-@mcp.tool()
-def validate_constraints(file_path: str) -> str:
-    """Validate all symbols in a file against their constraints.
-
-    Returns violations grouped by severity.
-
-    Args:
-        file_path: Relative path to the source file to validate.
-
-    Returns:
-        JSON with violation list and summary.
-    """
-    logger.debug(f"validate_constraints() called for {file_path}")
-    validator = ConstraintValidator(db)
-
-    try:
-        violations = validator.validate_file(file_path)
-
-        # Group by severity
-        by_severity = {"critical": [], "error": [], "warning": [], "info": []}
-        for v in violations:
-            severity = v.get("severity", "info")
-            if severity in by_severity:
-                by_severity[severity].append(v)
-
-        logger.info(f"Validated {file_path}: {len(violations)} violations found")
-
-        return json.dumps(
-            {
-                "status": "ok",
-                "file": file_path,
-                "total_violations": len(violations),
-                "critical": len(by_severity["critical"]),
-                "error": len(by_severity["error"]),
-                "warning": len(by_severity["warning"]),
-                "info": len(by_severity["info"]),
-                "violations": violations,
-            }
-        )
-    except Exception as e:
-        logger.error(f"Failed to validate constraints: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
-
-
-# ============================================================================
-# PHASE 4: Agent Empowerment Tools
-# ============================================================================
-
-@mcp.tool()
-def create_folder(path: str, name: str, description: str = None) -> str:
-    """Create a new folder and register it in the graph as a FOLDER node.
-
-    Args:
-        path: Folder path (e.g., 'src/auth/', 'lib/utils/')
-        name: Display name for the folder
-        description: Optional description of the folder's purpose
-
-    Returns:
-        JSON with folder_node_id, created_at, verified_node (proof of persistence)
-    """
-    logger.debug(f"create_folder() called for {path}")
-
-    try:
-        # Resolve to absolute path (relative paths go relative to workspace root)
-        abs_path = _resolve_path(path)
-        # Compute relative path from workspace root for DB storage
-        rel_path = _to_rel_path(abs_path)
-        logger.debug(f"Absolute path: {abs_path}, rel path (for DB): {rel_path}")
-
-        # Create directory
-        os.makedirs(abs_path, exist_ok=True)
-        logger.info(f"Directory created: {abs_path}")
-
-        # Create FOLDER node in graph using relative path
-        folder_id = f"folder:{rel_path}"
-        db.create_folder(folder_id, rel_path, description or name)
-
-        # Verify persistence
-        verified = db.verify_node(folder_id)
-        created_at = datetime.datetime.utcnow().isoformat()
-
-        return json.dumps(
-            {
-                "status": "ok",
-                "folder_node_id": folder_id,
-                "path": rel_path,
-                "name": name,
-                "created_at": created_at,
-                "verified_node": verified,
-                "message": f"Folder '{rel_path}' created and registered in graph"
-            }
-        )
-    except Exception as e:
-        logger.error(f"Failed to create folder: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
-
-
-@mcp.tool()
-def create_file(path: str, content: str, language: str = "python", description: str = None) -> str:
-    """Create a new file and register it as a CODE_BLOCK node, optionally indexing it.
-
-    Args:
-        path: File path (e.g., 'src/auth/token.py')
-        content: File content
-        language: Programming language (python, typescript, javascript, etc.)
-        description: Optional semantic description
-
-    Returns:
-        JSON with code_node_id, created_at, verified_node, and next steps
+        JSON with the file path, indexed symbols, and a verified_node proving
+        the file was written and indexed successfully.
     """
     logger.debug(f"create_file() called for {path}")
-    logger.debug(f"Current working directory: {os.getcwd()}")
 
-    # Resolve to absolute path (relative paths go relative to workspace root)
     abs_path = _resolve_path(path)
-    # Compute relative path from workspace root — this is what gets stored in the DB
     rel_path = _to_rel_path(abs_path)
-    logger.debug(f"Absolute path: {abs_path}")
-    logger.debug(f"Relative path (for DB): {rel_path}")
+    logger.debug(f"Absolute: {abs_path}, relative: {rel_path}")
 
     try:
-        # Check file doesn't exist
         if os.path.exists(abs_path):
-            logger.warning(f"File already exists: {abs_path}")
-            return json.dumps({"status": "error", "message": f"File already exists: {path}"})
+            return json.dumps({"status": "error", "message": f"File already exists: {rel_path}. Edit it directly instead."})
 
-        # Create parent directories
-        parent_dir = os.path.dirname(abs_path)
-        logger.debug(f"Creating parent directory: {parent_dir}")
-        os.makedirs(parent_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(abs_path) or WORKSPACE_ROOT, exist_ok=True)
 
-        # Write file (atomic: write to temp, move to target)
+        # Atomic write
         temp_path = abs_path + ".tmp"
         try:
-            logger.debug(f"Writing content to temp file: {temp_path}")
-            with open(temp_path, "w") as f:
+            with open(temp_path, "w", encoding="utf-8") as f:
                 f.write(content)
-            logger.debug(f"Renaming temp file to: {abs_path}")
             os.rename(temp_path, abs_path)
-            logger.info(f"File created successfully: {abs_path}")
-            logger.debug(f"File exists after creation: {os.path.exists(abs_path)}")
-            logger.debug(f"File size: {os.path.getsize(abs_path)} bytes")
+            logger.info(f"File created: {abs_path} ({os.path.getsize(abs_path)} bytes)")
         except Exception as e:
             if os.path.exists(temp_path):
-                logger.debug(f"Cleaning up temp file: {temp_path}")
                 os.remove(temp_path)
             raise e
 
-        # Auto-index if language is supported to create symbol nodes with anchors
-        # Pass the absolute path so index_file can find the file on disk
-        supported_languages = {"python", "typescript", "javascript", "jsx", "tsx"}
-        indexed = False
+        # Auto-index
+        supported = {"python", "typescript", "javascript", "jsx", "tsx"}
         symbols_indexed = 0
-        symbols = []
-        if language.lower() in supported_languages:
-            try:
-                index_result = index_file(abs_path)
-                result_data = json.loads(index_result)
-                indexed = result_data.get("status") == "ok"
-                symbols_indexed = result_data.get("symbols_indexed", 0)
-                symbols = result_data.get("symbols", [])
-                logger.info(f"Auto-indexed file: {abs_path} with {symbols_indexed} symbols")
-            except Exception as e:
-                logger.warning(f"Auto-indexing failed for {abs_path}: {e}")
-
-        # Verify persistence: check indexed symbols or file-level node
-        # Use rel_path (what index_file stores) to look up nodes
+        symbol_names = []
         verified = None
-        code_node_id = f"code:{rel_path}"  # Default file-level node ID
 
-        if symbols_indexed > 0 and symbols:
-            # If we indexed symbols, verify the first one (which proves the file was indexed)
-            first_symbol = symbols[0]
-            verified_node_id = f"code:{rel_path}:{first_symbol}"
-            verified = db.verify_node(verified_node_id)
-            code_node_id = verified_node_id
-            logger.debug(f"Verifying indexed symbol: {verified_node_id}, result: {verified is not None}")
-        else:
-            # If no symbols (empty file or unsupported language), create and verify file-level node
-            db.upsert_node(code_node_id, "CODE_BLOCK", content[:500], rel_path)
-            verified = db.verify_node(code_node_id)
-            logger.debug(f"Created file-level node: {code_node_id}")
+        if language.lower() in supported:
+            try:
+                index_result = json.loads(index(abs_path))
+                symbols_indexed = index_result.get("symbols_indexed", 0)
+                symbol_names = index_result.get("symbols", [])
+                if symbol_names:
+                    verified = db.verify_node(f"code:{rel_path}:{symbol_names[0]}")
+            except Exception as e:
+                logger.warning(f"Auto-index failed: {e}")
 
-        created_at = datetime.datetime.utcnow().isoformat()
+        if not verified:
+            node_id = f"code:{rel_path}"
+            db.upsert_node(node_id, "CODE_BLOCK", content[:500], rel_path)
+            verified = db.verify_node(node_id)
 
-        return json.dumps(
-            {
-                "status": "ok",
-                "code_node_id": code_node_id,
-                "path": rel_path,
-                "language": language,
-                "created_at": created_at,
-                "auto_indexed": indexed,
-                "symbols_indexed": symbols_indexed,
-                "verified_node": verified,
-                "message": f"File '{rel_path}' created and registered in graph" + (f" (auto-indexed {symbols_indexed} symbols)" if indexed and symbols_indexed > 0 else ""),
-                "next_steps": [
-                    "Symbols are indexed and anchored" if symbols_indexed > 0 else "File created (no symbols found or unsupported language)"
-                ]
-            }
-        )
+        return json.dumps({
+            "status": "ok",
+            "path": rel_path,
+            "symbols_indexed": symbols_indexed,
+            "symbols": symbol_names,
+            "verified_node": verified,
+            "tip": f"File written and indexed. Use remember() to attach context, e.g. remember('why-this-file', 'explanation', file_path='{rel_path}', symbol_name='{symbol_names[0]}')" if symbol_names else f"File written. Call index('{rel_path}') to index symbols after adding code.",
+        })
     except Exception as e:
-        logger.error(f"Failed to create file: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
-
-
-@mcp.tool()
-def move_file(old_path: str, new_path: str) -> str:
-    """Move a file and update its graph node.
-
-    Args:
-        old_path: Current file path
-        new_path: New file path
-
-    Returns:
-        JSON with updated code_node_id and verified_node
-    """
-    logger.debug(f"move_file() called: {old_path} -> {new_path}")
-
-    try:
-        import shutil
-
-        # Resolve to absolute paths (relative paths go relative to workspace root)
-        abs_old = _resolve_path(old_path)
-        abs_new = _resolve_path(new_path)
-        # Relative paths from workspace root for DB storage
-        rel_old = _to_rel_path(abs_old)
-        rel_new = _to_rel_path(abs_new)
-        logger.debug(f"Moving: {abs_old} -> {abs_new} (db: {rel_old} -> {rel_new})")
-
-        # Move file
-        if not os.path.exists(abs_old):
-            return json.dumps({"status": "error", "message": f"File not found: {old_path}"})
-
-        os.makedirs(os.path.dirname(abs_new), exist_ok=True)
-        shutil.move(abs_old, abs_new)
-        logger.info(f"File moved: {abs_old} -> {abs_new}")
-
-        # Update CODE_BLOCK node path using relative paths
-        old_node_id = f"code:{rel_old}"
-        new_node_id = f"code:{rel_new}"
-
-        old_node = db.get_node(old_node_id)
-        if old_node:
-            # Copy node to new ID and delete old
-            db.upsert_node(new_node_id, old_node["type"], old_node["content"], rel_new)
-            # Note: We don't delete old_node since we want to preserve history
-
-        # Verify persistence
-        verified = db.verify_node(new_node_id)
-        return json.dumps(
-            {
-                "status": "ok",
-                "old_node_id": old_node_id,
-                "new_node_id": new_node_id,
-                "new_path": rel_new,
-                "verified_node": verified,
-                "message": f"File moved and graph updated"
-            }
-        )
-    except Exception as e:
-        logger.error(f"Failed to move file: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
-
-
-@mcp.tool()
-def explain_code(symbol_name: str, include_thoughts: bool = True) -> str:
-    """Get a compressed explanation of code: symbol definition + all thoughts + dependencies.
-
-    Returns narrative explanation under 2000 tokens for agent context.
-
-    Args:
-        symbol_name: Prefixed symbol name (e.g., 'function:process_payment', 'class:AuthService')
-        include_thoughts: Include linked thoughts in explanation
-
-    Returns:
-        JSON with narrative explanation, dependencies, and thoughts
-    """
-    logger.debug(f"explain_code() called for {symbol_name}")
-
-    try:
-        # Get the code block node
-        code_node = db.get_node(symbol_name)
-        if not code_node:
-            return json.dumps({"status": "error", "message": f"Symbol not found: {symbol_name}"})
-
-        explanation = f"**{symbol_name}**\n\n"
-
-        # Add code snippet
-        if code_node.get("content"):
-            explanation += f"```\n{code_node['content'][:300]}\n```\n\n"
-
-        # Add linked thoughts
-        if include_thoughts:
-            explanation += "**Linked Thoughts:**\n"
-            thoughts_cursor = db.conn.execute(
-                """
-                SELECT n.id, n.content FROM nodes n
-                JOIN edges e ON e.target_id = n.id
-                WHERE e.source_id = ? AND n.type = 'THOUGHT'
-                ORDER BY n.created_at DESC
-                """,
-                (symbol_name,),
-            )
-            thoughts = thoughts_cursor.fetchall()
-            if thoughts:
-                for thought in thoughts:
-                    explanation += f"- {thought[1]}\n"
-            else:
-                explanation += "- (no linked thoughts)\n"
-
-        # Add dependencies
-        explanation += "\n**Dependencies:**\n"
-        deps_cursor = db.conn.execute(
-            """
-            SELECT target_id, relation FROM edges
-            WHERE source_id = ? AND relation IN ('DEPENDS_ON', 'REQUIRES_EDGE')
-            """,
-            (symbol_name,),
-        )
-        deps = deps_cursor.fetchall()
-        if deps:
-            for dep in deps:
-                explanation += f"- {dep[0]} ({dep[1]})\n"
-        else:
-            explanation += "- (no dependencies)\n"
-
-        return json.dumps(
-            {
-                "status": "ok",
-                "symbol": symbol_name,
-                "explanation": explanation,
-                "token_estimate": len(explanation.split()),
-            }
-        )
-    except Exception as e:
-        logger.error(f"Failed to explain code: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
-
-
-@mcp.tool()
-def suggest_refactoring(symbol_name: str) -> str:
-    """Suggest refactorings based on constraint violations and code structure.
-
-    Args:
-        symbol_name: Prefixed symbol name
-
-    Returns:
-        JSON with refactoring suggestions
-    """
-    logger.debug(f"suggest_refactoring() called for {symbol_name}")
-
-    try:
-        validator = ConstraintValidator(db)
-        code_node = db.get_node(symbol_name)
-
-        if not code_node:
-            return json.dumps({"status": "error", "message": f"Symbol not found: {symbol_name}"})
-
-        suggestions = []
-
-        # Check for constraint violations on this symbol
-        violations_cursor = db.conn.execute(
-            """
-            SELECT c.id, c.content FROM nodes c
-            JOIN edges e ON e.source_id = c.id
-            WHERE e.target_id = ? AND c.type = 'CONSTRAINT'
-            """,
-            (symbol_name,),
-        )
-        violations = violations_cursor.fetchall()
-
-        for violation in violations:
-            suggestions.append(
-                {
-                    "type": "constraint_violation",
-                    "constraint": violation[1],
-                    "recommendation": f"Refactor to satisfy constraint: {violation[1]}"
-                }
-            )
-
-        # Check for excessive dependencies
-        deps_cursor = db.conn.execute(
-            """
-            SELECT COUNT(*) FROM edges WHERE source_id = ? AND relation = 'DEPENDS_ON'
-            """,
-            (symbol_name,),
-        )
-        dep_count = deps_cursor.fetchone()[0]
-
-        if dep_count > 5:
-            suggestions.append(
-                {
-                    "type": "high_coupling",
-                    "dependencies": dep_count,
-                    "recommendation": "Consider breaking this symbol into smaller units (too many dependencies)"
-                }
-            )
-
-        return json.dumps(
-            {
-                "status": "ok",
-                "symbol": symbol_name,
-                "total_suggestions": len(suggestions),
-                "suggestions": suggestions
-            }
-        )
-    except Exception as e:
-        logger.error(f"Failed to suggest refactoring: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
-
-
-@mcp.tool()
-def generate_tests(symbol_name: str, test_dir: str = "tests") -> str:
-    """Generate a test stub file for a given symbol.
-
-    Args:
-        symbol_name: Prefixed symbol name (e.g., 'function:process_payment')
-        test_dir: Directory to create test file in
-
-    Returns:
-        JSON with test_file_path and test stub content
-    """
-    logger.debug(f"generate_tests() called for {symbol_name}")
-
-    try:
-        import os
-
-        code_node = db.get_node(symbol_name)
-        if not code_node:
-            return json.dumps({"status": "error", "message": f"Symbol not found: {symbol_name}"})
-
-        # Parse symbol name
-        parts = symbol_name.split(":")
-        symbol_type = parts[0]  # function, class, etc.
-        symbol_func = parts[1] if len(parts) > 1 else "unknown"
-
-        # Determine test language based on source file
-        source_file = code_node.get("path", "unknown")
-        if source_file.endswith(".py"):
-            test_ext = ".py"
-            test_content = f'''import pytest
-from {source_file.replace('/', '.').replace('.py', '')} import {symbol_func}
-
-
-def test_{symbol_func}_basic():
-    """Test basic functionality of {symbol_func}."""
-    # TODO: Implement test
-    pass
-
-
-def test_{symbol_func}_edge_cases():
-    """Test edge cases for {symbol_func}."""
-    # TODO: Implement test
-    pass
-
-
-def test_{symbol_func}_error_handling():
-    """Test error handling in {symbol_func}."""
-    # TODO: Implement test
-    pass
-'''
-        else:
-            test_ext = ".ts"
-            test_content = f'''import {{ {symbol_func} }} from '{source_file.replace('.ts', '').replace('.js', '')}'
-
-describe('{symbol_func}', () => {{
-    it('should perform basic operation', () => {{
-        // TODO: Implement test
-    }})
-
-    it('should handle edge cases', () => {{
-        // TODO: Implement test
-    }})
-
-    it('should handle errors', () => {{
-        // TODO: Implement test
-    }})
-}})
-'''
-
-        os.makedirs(test_dir, exist_ok=True)
-        test_file = f"{test_dir}/test_{symbol_func}{test_ext}"
-
-        # Avoid overwriting existing tests
-        if os.path.exists(test_file):
-            return json.dumps(
-                {
-                    "status": "ok",
-                    "symbol": symbol_name,
-                    "test_file": test_file,
-                    "message": "Test file already exists",
-                    "content": test_content,
-                }
-            )
-
-        # Write test file
-        with open(test_file, "w") as f:
-            f.write(test_content)
-
-        logger.info(f"Test stub created: {test_file}")
-
-        return json.dumps(
-            {
-                "status": "ok",
-                "symbol": symbol_name,
-                "test_file": test_file,
-                "test_cases": 3,
-                "content": test_content,
-                "message": f"Test stub created at {test_file}. Fill in the TODOs!"
-            }
-        )
-    except Exception as e:
-        logger.error(f"Failed to generate tests: {e}")
+        logger.error(f"create_file failed: {e}")
         return json.dumps({"status": "error", "message": str(e)})
 
 
 @mcp.tool()
 def debug_info() -> str:
-    """Return diagnostic info about the ShadowGraph server environment.
-
-    Call this first to verify the server is running and check paths.
-    """
-    import sqlite3 as _sqlite3
+    """Diagnostic info: DB path, workspace root, node count. Call if something seems wrong."""
     node_count = 0
     try:
         node_count = db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
@@ -1126,33 +474,26 @@ def debug_info() -> str:
     })
 
 
+# ============================================================================
 # Entry point
+# ============================================================================
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--cli":
-        # CLI mode for direct invocation from the VS Code extension
         if len(sys.argv) < 3:
             print(json.dumps({"error": "Usage: main.py --cli <command> [args...]"}))
             sys.exit(1)
         command = sys.argv[2]
-        if command == "index_file" and len(sys.argv) > 3:
-            result = index_file(sys.argv[3])
-            print(result)
-        elif command == "check_drift" and len(sys.argv) > 3:
-            result = check_drift(sys.argv[3])
-            print(result)
-        elif command == "serialize_graph":
-            output = sys.argv[3] if len(sys.argv) > 3 else ".shadow/graph.jsonl"
-            result = serialize_graph(output)
-            print(result)
+        if command == "index" and len(sys.argv) > 3:
+            print(index(sys.argv[3]))
+        elif command == "check" and len(sys.argv) > 3:
+            print(check(sys.argv[3]))
         else:
-            print(json.dumps({"error": f"Unknown command or missing args: {command}"}))
+            print(json.dumps({"error": f"Unknown command: {command}"}))
             sys.exit(1)
     else:
-        # MCP stdio mode (default)
         try:
             logger.info("Starting MCP stdio transport")
             mcp.run(transport="stdio")
-            logger.info("MCP stdio transport exited normally")
         except Exception as e:
-            logger.error(f"Fatal error in MCP server: {e}", exc_info=True)
+            logger.error(f"Fatal error: {e}", exc_info=True)
             sys.exit(1)

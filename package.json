@@ -2,18 +2,18 @@
     "name": "shadowgraph",
     "displayName": "ShadowGraph",
     "description": "Semantic intent preservation for code. Link thoughts, constraints, and architectural decisions to code symbols via stable AST anchors. Team collaboration through git-tracked graphs.",
-    "version": "0.3.8",
+    "version": "0.4.0",
     "publisher": "schniti269",
     "author": "ShadowGraph Contributors",
     "license": "MIT",
     "repository": {
         "type": "git",
-        "url": "https://github.com/yourusername/shadowgraph"
+        "url": "https://github.com/schniti269/shadowgraph"
     },
     "bugs": {
-        "url": "https://github.com/yourusername/shadowgraph/issues"
+        "url": "https://github.com/schniti269/shadowgraph/issues"
     },
-    "homepage": "https://github.com/yourusername/shadowgraph#readme",
+    "homepage": "https://github.com/schniti269/shadowgraph#readme",
     "keywords": [
         "semantic",
         "ai-agents",
