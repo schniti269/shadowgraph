@@ -17,6 +17,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 from database import ShadowDB  # noqa: E402
 from indexer import index_file as do_index_file, extract_imports  # noqa: E402
 from drift import check_drift as do_check_drift  # noqa: E402
+from dimensions.knowledge import KnowledgeDimension  # noqa: E402
+from dimensions.git import GitDimension  # noqa: E402
 
 from mcp.server.fastmcp import FastMCP  # noqa: E402
 
@@ -49,6 +51,13 @@ except Exception as e:
     raise
 
 mcp = FastMCP("ShadowGraph")
+
+# Dimension providers — keyed by name for O(1) lookup
+_PROVIDERS = {
+    "knowledge": KnowledgeDimension(db),
+    "git": GitDimension(db, WORKSPACE_ROOT),
+}
+_ALL_DIMENSIONS = list(_PROVIDERS.keys())
 
 
 # ============================================================================
@@ -155,124 +164,137 @@ def remember(
 
 
 @mcp.tool()
-def recall(query: str = "") -> str:
-    """Retrieve knowledge from the graph — code context, thoughts, business rules.
+def recall(
+    query: str = "",
+    dimensions: list[str] = None,
+    depth: int = 1,
+    filter: dict = None,
+) -> str:
+    """Retrieve knowledge across multiple dimensions — code, history, thoughts, dependencies.
 
-    The single tool for reading ALL knowledge. Use it to understand WHY code
-    exists before touching it, and to look up business rules.
+    This replaces read_file, git_log, grep, find_references. ONE call.
 
     EXAMPLES:
-    - recall()                   → all business context + recently indexed symbols
-    - recall("parcels")          → everything about parcels (code + business rules)
-    - recall("function:charge")  → the charge function's code + all linked thoughts
-    - recall("crm/models.py")    → all symbols and thoughts in that file
+    - recall()                                    → all business context + indexed symbols
+    - recall("function:charge")                   → symbol + all knowledge thoughts
+    - recall("function:charge", ["knowledge","git"]) → thoughts + git history/churn
+    - recall("crm/models.py", depth=2)            → file + parent folder context
+    - recall("payment", filter={"since_days":30}) → payment symbols, git limited to 30 days
 
     Args:
-        query: What to look up. Can be:
-               - Empty / "*"          → all business context + symbol list
-               - A symbol name        → "function:charge", "class:Customer"
-               - A file path          → "crm/models.py"
-               - Any keyword          → searches across all stored knowledge
+        query:      Symbol name ("function:charge"), file path ("crm/models.py"), or keyword.
+                    Empty → list all indexed symbols + business context.
+        dimensions: Which dimensions to query. Default: all available.
+                    Options: "knowledge", "git"  (more coming: "syntax", "refs")
+        depth:      1 = symbol only, 2 = include parent class/file context too.
+        filter:     Cross-dimension options: {"since_days": 30}
 
     Returns:
-        JSON with matching code, thoughts, and business context.
+        JSON with symbol location + one key per requested dimension.
     """
-    logger.debug(f"recall() query={query!r}")
+    logger.debug(f"recall() query={query!r} dimensions={dimensions} depth={depth} filter={filter}")
     q = query.strip()
+    opts = filter or {}
+    requested = dimensions if dimensions is not None else _ALL_DIMENSIONS
 
-    results = {
-        "query": q or "*",
-        "business_context": [],
-        "symbols": [],
-        "thoughts": [],
-    }
-
+    # ── Empty query: index listing ─────────────────────────────────────────
     if not q or q == "*":
-        # Return ALL business context + list of indexed symbols
-        biz_cursor = db.conn.execute(
+        biz = db.conn.execute(
             """
-            SELECT n.id, n.content, n.created_at FROM nodes n
-            WHERE (n.id LIKE 'business:%' OR n.id LIKE 'thought:%')
-              AND n.type = 'THOUGHT'
+            SELECT n.id, n.content FROM nodes n
+            WHERE n.type = 'THOUGHT'
               AND n.id IN (SELECT target_id FROM edges WHERE source_id = 'project:business-context')
             ORDER BY n.created_at DESC
             """
-        )
-        results["business_context"] = [
-            {"id": dict(r)["id"], "text": dict(r)["content"]}
-            for r in biz_cursor.fetchall()
-        ]
+        ).fetchall()
+        syms = db.conn.execute(
+            "SELECT id FROM nodes WHERE type='CODE_BLOCK' AND id LIKE 'code:%:%' ORDER BY created_at DESC LIMIT 30"
+        ).fetchall()
+        return json.dumps({
+            "query": "*",
+            "business_context": [{"id": dict(r)["id"], "text": dict(r)["content"]} for r in biz],
+            "symbols": [dict(r)["id"].split(":", 2)[2] + " (" + dict(r)["id"] + ")" for r in syms],
+            "tip": "Pass a symbol name or keyword to get full details across dimensions.",
+        })
 
-        sym_cursor = db.conn.execute(
-            """
-            SELECT id FROM nodes
-            WHERE type = 'CODE_BLOCK' AND id LIKE 'code:%:%'
-            ORDER BY created_at DESC LIMIT 30
-            """
-        )
-        results["symbols"] = [dict(r)["id"].split(":", 2)[2] + " (" + dict(r)["id"] + ")"
-                              for r in sym_cursor.fetchall()]
-        results["tip"] = "Pass a symbol name or keyword to recall() to get full details."
-        return json.dumps(results)
+    # ── Resolve to a node_id ───────────────────────────────────────────────
+    node_id = None
+    file_path = None
 
-    # Try exact code node match first
-    exact_id = None
     if q.startswith("code:"):
-        exact_id = q
+        node_id = q
     else:
-        # Try as a symbol: code:{file}:{q}
         row = db.conn.execute(
             "SELECT id FROM nodes WHERE id LIKE ? AND type='CODE_BLOCK' LIMIT 1",
-            (f"code:%:{q}",)
+            (f"code:%:{q}",),
         ).fetchone()
         if row:
-            exact_id = dict(row)["id"]
+            node_id = dict(row)["id"]
 
-    if exact_id:
-        node = db.get_node(exact_id)
-        if node:
-            results["symbols"] = [{
-                "node_id": exact_id,
-                "code": node["content"],
-            }]
-            thoughts = db.conn.execute(
-                """
-                SELECT n.id, n.content, n.created_at FROM nodes n
-                JOIN edges e ON e.target_id = n.id
-                WHERE e.source_id = ? AND n.type = 'THOUGHT'
-                ORDER BY n.created_at DESC
-                """,
-                (exact_id,)
-            ).fetchall()
-            results["thoughts"] = [{"id": dict(t)["id"], "text": dict(t)["content"]} for t in thoughts]
-            if not results["thoughts"]:
-                results["tip"] = f"No thoughts linked yet. Use remember(topic, context, file_path, symbol_name) to add context."
-            return json.dumps(results)
+    if node_id:
+        # Extract file_path from node_id: code:{file}:{symbol}
+        parts = node_id.split(":", 2)
+        if len(parts) == 3:
+            file_path = parts[1]
 
-    # Keyword search: match node IDs and content
+    # ── Fan out to dimension providers ────────────────────────────────────
+    if node_id:
+        node = db.get_node(node_id)
+        result = {
+            "query": q,
+            "node_id": node_id,
+            "location": f"{file_path}:{node_id.split(':')[-1]}" if file_path else node_id,
+            "dimensions": {},
+        }
+        for dim_name in requested:
+            provider = _PROVIDERS.get(dim_name)
+            if provider:
+                try:
+                    result["dimensions"][dim_name] = provider.query(node_id, file_path, opts)
+                except Exception as e:
+                    logger.warning(f"Dimension {dim_name} failed: {e}")
+                    result["dimensions"][dim_name] = {"error": str(e)}
+
+        # depth=2: also include parent class/file context
+        if depth >= 2 and file_path:
+            file_node_id = f"file:{file_path}"
+            parent = db.get_node(file_node_id)
+            if parent:
+                result["parent_file"] = {"node_id": file_node_id}
+                for dim_name in requested:
+                    provider = _PROVIDERS.get(dim_name)
+                    if provider:
+                        try:
+                            result["parent_file"][dim_name] = provider.query(file_node_id, file_path, opts)
+                        except Exception:
+                            pass
+
+        return json.dumps(result)
+
+    # ── Keyword fallback ───────────────────────────────────────────────────
     like = f"%{q}%"
     code_rows = db.conn.execute(
         "SELECT id, content FROM nodes WHERE type='CODE_BLOCK' AND (id LIKE ? OR content LIKE ?) LIMIT 10",
-        (like, like)
+        (like, like),
     ).fetchall()
-    results["symbols"] = [{"node_id": dict(r)["id"], "snippet": (dict(r)["content"] or "")[:120]} for r in code_rows]
-
     thought_rows = db.conn.execute(
         "SELECT id, content FROM nodes WHERE type='THOUGHT' AND content LIKE ? LIMIT 10",
-        (like,)
+        (like,),
     ).fetchall()
-    results["thoughts"] = [{"id": dict(r)["id"], "text": dict(r)["content"]} for r in thought_rows]
-
     biz_rows = db.conn.execute(
         "SELECT id, content FROM nodes WHERE id LIKE 'business:%' AND (id LIKE ? OR content LIKE ?) LIMIT 5",
-        (like, like)
+        (like, like),
     ).fetchall()
-    results["business_context"] = [{"id": dict(r)["id"], "text": dict(r)["content"]} for r in biz_rows]
 
-    if not results["symbols"] and not results["thoughts"] and not results["business_context"]:
-        results["tip"] = f"Nothing found for '{q}'. Try recall() with no args to see everything that's indexed."
-
-    return json.dumps(results)
+    result = {
+        "query": q,
+        "symbols": [{"node_id": dict(r)["id"], "snippet": (dict(r)["content"] or "")[:120]} for r in code_rows],
+        "thoughts": [{"id": dict(r)["id"], "text": dict(r)["content"]} for r in thought_rows],
+        "business_context": [{"id": dict(r)["id"], "text": dict(r)["content"]} for r in biz_rows],
+    }
+    if not any(result[k] for k in ("symbols", "thoughts", "business_context")):
+        result["tip"] = f"Nothing found for '{q}'. Try recall() with no args to see everything indexed."
+    return json.dumps(result)
 
 
 @mcp.tool()
@@ -451,6 +473,123 @@ def create_file(path: str, content: str, language: str = "python") -> str:
     except Exception as e:
         logger.error(f"create_file failed: {e}")
         return json.dumps({"status": "error", "message": str(e)})
+
+
+@mcp.tool()
+def edit(file_path: str, symbol_name: str, thought: str, new_code: str) -> str:
+    """Edit a symbol's code — but you MUST explain WHY first.
+
+    This is the only tool that modifies existing files. It atomically:
+    1. Writes your thought to the knowledge graph (the WHY)
+    2. Replaces the symbol's code in the file
+    3. Re-indexes the file so the graph stays current
+
+    If any step fails the file is rolled back. No silent half-writes.
+
+    Args:
+        file_path:   Relative path to the file (e.g. "src/billing/stripe.py").
+        symbol_name: Prefixed symbol to replace (e.g. "function:charge", "class:Customer").
+                     Call recall(file_path) first to see valid symbol names.
+        thought:     WHY you are making this change. Be specific — business reason, not just what.
+        new_code:    The complete new source code for this symbol only (not the whole file).
+
+    Returns:
+        JSON with thought_id, new AST hash, and confirmation the file was updated.
+    """
+    logger.debug(f"edit() file={file_path} symbol={symbol_name}")
+
+    abs_path = _resolve_path(file_path)
+    rel_path = _to_rel_path(abs_path)
+
+    # 1. Verify symbol is indexed
+    node_id = f"code:{rel_path}:{symbol_name}"
+    anchor_rows = db.conn.execute(
+        "SELECT start_line, ast_hash FROM anchors WHERE node_id=? AND status='VALID'",
+        (node_id,),
+    ).fetchall()
+    if not anchor_rows:
+        return json.dumps({
+            "status": "error",
+            "message": f"Symbol '{symbol_name}' not found in index for {rel_path}. Call index('{rel_path}') first, then recall() to confirm the symbol name.",
+        })
+
+    anchor = dict(anchor_rows[0])
+    start_line = anchor["start_line"]
+
+    # 2. Read file, find the symbol block to replace
+    try:
+        with open(abs_path, "r", encoding="utf-8") as f:
+            original = f.read()
+    except OSError as e:
+        return json.dumps({"status": "error", "message": f"Cannot read file: {e}"})
+
+    lines = original.splitlines(keepends=True)
+
+    # Find the symbol start line (1-indexed) and determine its extent via indentation
+    if start_line < 1 or start_line > len(lines):
+        return json.dumps({"status": "error", "message": f"start_line {start_line} out of range for {rel_path}"})
+
+    # Determine block end: collect lines while indented past the definition line
+    def_indent = len(lines[start_line - 1]) - len(lines[start_line - 1].lstrip())
+    end_line = start_line
+    for i in range(start_line, len(lines)):
+        stripped = lines[i].lstrip()
+        if i == start_line - 1 or not stripped or len(lines[i]) - len(stripped) > def_indent:
+            end_line = i + 1
+        elif i > start_line - 1:
+            break
+
+    # 3. Write thought BEFORE touching the file
+    thought_id = f"thought:{uuid.uuid4().hex[:12]}"
+    db.upsert_node(thought_id, "THOUGHT", thought)
+    try:
+        db.add_edge(node_id, thought_id, "HAS_THOUGHT")
+    except Exception as e:
+        logger.warning(f"Could not link thought to node: {e}")
+
+    # 4. Atomic file rewrite with rollback
+    backup = abs_path + ".bak"
+    try:
+        with open(backup, "w", encoding="utf-8") as f:
+            f.write(original)
+
+        new_lines = lines[:start_line - 1] + [new_code if new_code.endswith("\n") else new_code + "\n"] + lines[end_line:]
+        temp_path = abs_path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        os.replace(temp_path, abs_path)
+        logger.info(f"edit() wrote {rel_path} (replaced lines {start_line}-{end_line})")
+    except Exception as e:
+        # Rollback
+        if os.path.exists(backup):
+            os.replace(backup, abs_path)
+        return json.dumps({"status": "error", "message": f"File write failed, rolled back: {e}"})
+    finally:
+        if os.path.exists(backup):
+            os.remove(backup)
+
+    # 5. Re-index to update AST hash
+    try:
+        idx = json.loads(index(abs_path))
+        new_symbols = idx.get("symbols", [])
+    except Exception as e:
+        logger.warning(f"Re-index after edit failed: {e}")
+        new_symbols = []
+
+    # 6. Verify new hash stored
+    updated_anchor = db.conn.execute(
+        "SELECT ast_hash, status FROM anchors WHERE node_id=?", (node_id,)
+    ).fetchone()
+    new_hash = dict(updated_anchor)["ast_hash"] if updated_anchor else None
+
+    return json.dumps({
+        "status": "ok",
+        "file": rel_path,
+        "symbol": symbol_name,
+        "thought_id": thought_id,
+        "new_ast_hash": new_hash,
+        "symbols_reindexed": new_symbols,
+    })
 
 
 @mcp.tool()

@@ -192,9 +192,10 @@ def test_e2e_recall_returns_thoughts():
     result = json.loads(server.recall("function:login"))
     print("\nrecall:", json.dumps(result, indent=2))
 
-    assert len(result["thoughts"]) > 0, \
+    thoughts = result.get("dimensions", {}).get("knowledge", {}).get("thoughts", [])
+    assert len(thoughts) > 0, \
         "recall() returned 0 thoughts after remember() — chain broken"
-    assert any("bcrypt" in t["text"] for t in result["thoughts"]), \
+    assert any("bcrypt" in t["text"] for t in thoughts), \
         "Thought text not found in recall result"
 
 
@@ -290,9 +291,10 @@ def test_e2e_full_chain():
     # Step 3: Recall
     recall_res = json.loads(server.recall("function:charge"))
     print("recall:", json.dumps(recall_res, indent=2))
-    assert len(recall_res["thoughts"]) > 0, "recall() returned no thoughts"
-    assert recall_res["symbols"], "recall() returned no code"
-    assert any("Stripe" in t["text"] for t in recall_res["thoughts"])
+    thoughts = recall_res.get("dimensions", {}).get("knowledge", {}).get("thoughts", [])
+    assert len(thoughts) > 0, "recall() returned no thoughts"
+    assert recall_res.get("node_id") or recall_res.get("symbols"), "recall() returned no code"
+    assert any("Stripe" in t["text"] for t in thoughts)
 
     # Step 4: Raw DB check
     conn = raw_db()

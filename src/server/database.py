@@ -3,11 +3,18 @@ import sqlite3
 import uuid
 from pathlib import Path
 
+try:
+    import duckdb
+    _DUCKDB_AVAILABLE = True
+except ImportError:
+    _DUCKDB_AVAILABLE = False
+
 
 class ShadowDB:
     def __init__(self, db_path: str):
         self.db_path = db_path
         self.conn: sqlite3.Connection | None = None
+        self.duck: "duckdb.DuckDBPyConnection | None" = None
 
     def connect(self) -> None:
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
@@ -15,6 +22,22 @@ class ShadowDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
+
+        # DuckDB for analytical dimension queries
+        if _DUCKDB_AVAILABLE:
+            facts_path = str(Path(self.db_path).parent / "shadow-facts.duckdb")
+            self.duck = duckdb.connect(facts_path)
+            self.duck.execute("""
+                CREATE TABLE IF NOT EXISTS git_facts (
+                    file_path TEXT NOT NULL,
+                    symbol_name TEXT,
+                    fact_type TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    fetched_at TIMESTAMP DEFAULT current_timestamp,
+                    file_mtime DOUBLE,
+                    PRIMARY KEY (file_path, symbol_name, fact_type)
+                )
+            """)
 
         # Migration: Apply before schema creation to handle old databases
         self._apply_migrations()
@@ -225,7 +248,18 @@ class ShadowDB:
         )
         return [dict(row) for row in cursor.fetchall()]
 
+    def duck_query(self, sql: str, params=None):
+        """Run an analytical query via DuckDB. Returns list of dicts, or [] if unavailable."""
+        if not self.duck:
+            return []
+        rel = self.duck.execute(sql, params or [])
+        cols = [d[0] for d in rel.description]
+        return [dict(zip(cols, row)) for row in rel.fetchall()]
+
     def close(self) -> None:
+        if self.duck:
+            self.duck.close()
+            self.duck = None
         if self.conn:
             self.conn.close()
             self.conn = None
