@@ -14,8 +14,17 @@ def _run(cmd: list[str], cwd: str) -> str:
         return ""
 
 
+def _git_available(cwd: str) -> bool:
+    """True if cwd is inside a git repo."""
+    return bool(_run(["git", "rev-parse", "--git-dir"], cwd=cwd))
+
+
 class GitDimension(DimensionProvider):
-    """Git history, churn, and authorship — cached in DuckDB (shadow-facts.duckdb)."""
+    """Git history, churn, and authorship.
+
+    Always fetches via subprocess. DuckDB caching is optional — if unavailable,
+    data is still returned (just re-fetched each call).
+    """
 
     name = "git"
 
@@ -24,63 +33,72 @@ class GitDimension(DimensionProvider):
         self._root = workspace_root
 
     def query(self, symbol: str, file_path: str | None, opts: dict) -> dict:
-        if not file_path or not self._db.duck:
-            return {"available": False, "reason": "no file_path or DuckDB unavailable"}
+        if not file_path:
+            return {"available": False, "reason": "no file_path"}
 
         abs_path = os.path.join(self._root, file_path)
-        since_days = opts.get("since_days", 90)
-
-        # Check cache validity by file mtime
-        try:
-            mtime = os.path.getmtime(abs_path)
-        except OSError:
+        if not os.path.exists(abs_path):
             return {"available": False, "reason": "file not found"}
 
-        cached = self._db.duck_query(
-            "SELECT content, fact_type FROM git_facts WHERE file_path=? AND symbol_name=? AND file_mtime=?",
-            [file_path, symbol, mtime],
-        )
-        if len(cached) >= 2:
-            facts = {r["fact_type"]: json.loads(r["content"]) for r in cached}
-            return self._format(facts, cached=True)
+        if not _git_available(self._root):
+            return {"available": False, "reason": "not a git repository"}
 
-        # Fetch fresh from git
-        facts = {}
+        since_days = opts.get("since_days", 90)
+        mtime = os.path.getmtime(abs_path)
 
-        # Recent commits touching this file
+        # Try DuckDB cache first (optional)
+        if self._db.duck:
+            cached = self._db.duck_query(
+                "SELECT content, fact_type FROM git_facts WHERE file_path=? AND symbol_name=? AND file_mtime=?",
+                [file_path, symbol, mtime],
+            )
+            if len(cached) >= 3:  # commits + churn + authors all cached
+                facts = {r["fact_type"]: json.loads(r["content"]) for r in cached}
+                return self._format(facts)
+
+        # Fetch from git
+        facts = self._fetch(file_path, since_days)
+
+        # Cache in DuckDB if available
+        if self._db.duck:
+            now = datetime.now(timezone.utc).isoformat()
+            for fact_type, value in facts.items():
+                try:
+                    self._db.duck.execute(
+                        """
+                        INSERT OR REPLACE INTO git_facts
+                        (file_path, symbol_name, fact_type, content, fetched_at, file_mtime)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        [file_path, symbol, fact_type, json.dumps(value), now, mtime],
+                    )
+                except Exception:
+                    pass  # Caching is best-effort
+
+        return self._format(facts)
+
+    def _fetch(self, file_path: str, since_days: int) -> dict:
         log = _run(
             ["git", "log", f"--since={since_days} days ago", "--oneline", "--follow", "--", file_path],
             cwd=self._root,
         )
-        commits = [line.strip() for line in log.splitlines() if line.strip()]
-        facts["commits"] = commits[:20]
-        facts["churn"] = len(commits)
+        commits = [l.strip() for l in log.splitlines() if l.strip()]
 
-        # Authors
         blame_log = _run(
             ["git", "log", "--format=%an", "--follow", "--", file_path],
             cwd=self._root,
         )
         authors = list(dict.fromkeys(l.strip() for l in blame_log.splitlines() if l.strip()))
-        facts["authors"] = authors[:10]
 
-        # Cache into DuckDB
-        now = datetime.now(timezone.utc).isoformat()
-        for fact_type, value in facts.items():
-            self._db.duck.execute(
-                """
-                INSERT OR REPLACE INTO git_facts (file_path, symbol_name, fact_type, content, fetched_at, file_mtime)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [file_path, symbol, fact_type, json.dumps(value), now, mtime],
-            )
+        return {
+            "commits": commits[:20],
+            "churn": len(commits),
+            "authors": authors[:10],
+        }
 
-        return self._format(facts, cached=False)
-
-    def _format(self, facts: dict, cached: bool) -> dict:
+    def _format(self, facts: dict) -> dict:
         return {
             "churn": facts.get("churn", 0),
             "authors": facts.get("authors", []),
             "recent_commits": facts.get("commits", []),
-            "_cached": cached,
         }

@@ -82,7 +82,7 @@ def _to_rel_path(path: str) -> str:
 
 
 # ============================================================================
-# THE 5 TOOLS
+# THE 6 TOOLS
 # ============================================================================
 
 @mcp.tool()
@@ -92,30 +92,19 @@ def remember(
     file_path: str = None,
     symbol_name: str = None,
 ) -> str:
-    """Save knowledge to the graph — WHY code exists, business rules, design decisions.
+    """Attach knowledge to the graph — business rules, decisions, constraints, domain facts.
 
-    *** THIS TOOL DOES NOT CREATE OR EDIT ANY FILES. ***
-    Use create_file() to write code to disk.
-
-    This is the single tool for storing ALL knowledge:
-
-    EXAMPLES:
-    - Business rule:   remember("shipping", "Always DPD, national only, hub in Berlin")
-    - Design decision: remember("why retry", "Added retry to handle flaky payment gateway",
-                                file_path="payments.py", symbol_name="function:charge")
-    - Before editing:  remember("refactor auth", "Splitting into two functions for testability",
-                                file_path="auth.py", symbol_name="class:AuthService")
-    - Domain fact:     remember("tracking-api", "Parcel tracking at http://123.22.123.1:7534/parcels")
+    Does NOT touch files. Call before or after edit() to record why a change was made.
 
     Args:
-        topic:       Short label for this knowledge (e.g. "why-retry", "pricing-rule", "parcel-api")
-        context:     The full explanation. Be specific — include business reason, not just technical what.
-        file_path:   Optional. Relative path to a source file to link this to (e.g. "crm/models.py").
-        symbol_name: Optional. Symbol in the file to link to (e.g. "function:charge", "class:Customer").
-                     Call recall() with no args first to see available symbols if unsure.
+        topic:       Short slug for this knowledge ("why-retry", "pricing-rule", "parcel-api").
+        context:     The explanation. Include business reason, not just what the code does.
+        file_path:   Optional file to link to ("src/billing/stripe.py").
+        symbol_name: Optional symbol in that file ("function:charge", "class:Customer").
+                     Run recall(file_path) first to see valid symbol names.
 
-    Returns:
-        JSON confirmation. Knowledge is now in the graph for future agents and humans.
+    Returns {"status":"ok", "thought_id", "linked_to"}.
+    linked_to will warn if symbol_name wasn't indexed yet — call index() first in that case.
     """
     logger.debug(f"remember() topic={topic}, file={file_path}, symbol={symbol_name}")
 
@@ -170,27 +159,25 @@ def recall(
     depth: int = 1,
     filter: dict = None,
 ) -> str:
-    """Retrieve knowledge across multiple dimensions — code, history, thoughts, dependencies.
+    """Query code knowledge across all dimensions. Replaces read_file, git_log, grep, find_references.
 
-    This replaces read_file, git_log, grep, find_references. ONE call.
-
-    EXAMPLES:
-    - recall()                                    → all business context + indexed symbols
-    - recall("function:charge")                   → symbol + all knowledge thoughts
-    - recall("function:charge", ["knowledge","git"]) → thoughts + git history/churn
-    - recall("crm/models.py", depth=2)            → file + parent folder context
-    - recall("payment", filter={"since_days":30}) → payment symbols, git limited to 30 days
+    Call this BEFORE editing anything to understand what exists and why.
 
     Args:
-        query:      Symbol name ("function:charge"), file path ("crm/models.py"), or keyword.
-                    Empty → list all indexed symbols + business context.
-        dimensions: Which dimensions to query. Default: all available.
-                    Options: "knowledge", "git"  (more coming: "syntax", "refs")
-        depth:      1 = symbol only, 2 = include parent class/file context too.
-        filter:     Cross-dimension options: {"since_days": 30}
+        query:      What to look up:
+                    - Empty / omitted     → all business context + list of indexed symbols
+                    - "function:charge"   → that symbol's thoughts, git history, etc.
+                    - "src/billing.py"    → all symbols in that file
+                    - "payment"           → keyword search across everything
+        dimensions: Subset of dimensions to query. Default: all available.
+                    "knowledge" — agent-written thoughts and decisions (always available)
+                    "git"       — commit history, churn, authors (requires git repo)
+        depth:      1 = requested symbol only (default).
+                    2 = symbol + parent file context.
+        filter:     Narrow results: {"since_days": 30} limits git to last 30 days.
 
-    Returns:
-        JSON with symbol location + one key per requested dimension.
+    Returns JSON: {node_id, location, dimensions: {knowledge: {...}, git: {...}}}
+    For empty query returns: {business_context: [...], symbols: [...]}
     """
     logger.debug(f"recall() query={query!r} dimensions={dimensions} depth={depth} filter={filter}")
     q = query.strip()
@@ -299,19 +286,16 @@ def recall(
 
 @mcp.tool()
 def index(file_path: str) -> str:
-    """Parse a source file and store all its symbols (functions, classes) in the graph.
+    """Parse a source file and register all its symbols (functions, classes, interfaces, types, enums).
 
-    Call this:
-    - After creating a new file with create_file()
-    - After editing an existing file
-    - On any file before calling remember() with a symbol_name from it
+    Call this on any file before using remember() or edit() with a symbol_name from it.
+    Also call after manually editing a file to keep the graph in sync.
 
     Args:
-        file_path: Path to the source file (absolute or relative to project root).
-                   Supports Python and TypeScript/JavaScript.
+        file_path: Path to the file (absolute or relative to project root).
+                   Supported: .py, .ts, .tsx, .js, .jsx
 
-    Returns:
-        JSON with the list of symbols now indexed (use these names in remember() and recall()).
+    Returns JSON with the indexed symbol names — use these exact strings in remember() and edit().
     """
     logger.debug(f"index() called with: {file_path}")
     abs_path = _resolve_path(file_path)
@@ -354,17 +338,15 @@ def index(file_path: str) -> str:
 
 @mcp.tool()
 def check(file_path: str = None) -> str:
-    """Check for stale thoughts — symbols whose code changed after thoughts were written.
+    """Detect symbols whose code changed after their linked thoughts were written.
 
-    When code changes but its linked thoughts aren't updated, they become stale.
-    Call this after editing files to see what context might be out of date.
+    Call after editing files to find what knowledge is now out of date.
+    Stale thoughts are misleading — update them with remember() before the next agent reads them.
 
     Args:
-        file_path: Optional. Path to a specific file to check.
-                   Leave empty to check all recently modified files.
+        file_path: Optional. Specific file to check. Omit to check all indexed files.
 
-    Returns:
-        JSON with list of stale symbols and the thoughts that need reviewing.
+    Returns JSON: {stale_count, stale_symbols: [{symbol, file, old_hash, new_hash}]}
     """
     logger.debug(f"check() called, file_path={file_path}")
 
@@ -397,25 +379,20 @@ def check(file_path: str = None) -> str:
 
 
 @mcp.tool()
-def create_file(path: str, content: str, language: str = "python") -> str:
-    """Create a new file on disk and index its symbols into the graph.
+def create_file(path: str, content: str, language: str = "python", overwrite: bool = False) -> str:
+    """Write a file to disk and index its symbols. The only tool that touches the filesystem.
 
-    *** THIS IS THE ONLY TOOL THAT WRITES FILES. ***
-    remember(), recall(), index(), and check() do NOT touch the filesystem.
-
-    After creating the file, its symbols are automatically indexed so you can
-    immediately use remember() to attach thoughts to them.
+    Use for new files OR to replace a file's entire content.
+    To modify a specific existing function/class, prefer edit() — it's atomic and records WHY.
 
     Args:
-        path:     File path (absolute, or relative to project root).
-                  e.g. "crm/parcel_tracking.py" or "C:/project/src/auth.py"
-        content:  The full file content to write.
-        language: "python", "typescript", "javascript" (default: "python").
-                  Used to determine which symbols to index.
+        path:      File path (relative to project root or absolute).
+        content:   Full file content to write.
+        language:  "python", "typescript", "javascript" (default: "python").
+        overwrite: Set True to replace an existing file. Default False (safe guard).
 
-    Returns:
-        JSON with the file path, indexed symbols, and a verified_node proving
-        the file was written and indexed successfully.
+    Returns JSON: {path, symbols_indexed, symbols, verified_node}
+    symbols are the indexed names — use them directly in remember() and edit().
     """
     logger.debug(f"create_file() called for {path}")
 
@@ -424,8 +401,8 @@ def create_file(path: str, content: str, language: str = "python") -> str:
     logger.debug(f"Absolute: {abs_path}, relative: {rel_path}")
 
     try:
-        if os.path.exists(abs_path):
-            return json.dumps({"status": "error", "message": f"File already exists: {rel_path}. Edit it directly instead."})
+        if os.path.exists(abs_path) and not overwrite:
+            return json.dumps({"status": "error", "message": f"File already exists: {rel_path}. Pass overwrite=True to replace it, or use edit() to modify a specific symbol."})
 
         os.makedirs(os.path.dirname(abs_path) or WORKSPACE_ROOT, exist_ok=True)
 
@@ -477,24 +454,26 @@ def create_file(path: str, content: str, language: str = "python") -> str:
 
 @mcp.tool()
 def edit(file_path: str, symbol_name: str, thought: str, new_code: str) -> str:
-    """Edit a symbol's code — but you MUST explain WHY first.
+    """Modify an existing symbol's code. Requires explaining WHY before the change is written.
 
-    This is the only tool that modifies existing files. It atomically:
-    1. Writes your thought to the knowledge graph (the WHY)
-    2. Replaces the symbol's code in the file
-    3. Re-indexes the file so the graph stays current
+    Atomically: records thought → rewrites symbol → re-indexes. Rolls back on any failure.
+    Use this for modifying existing functions, classes, interfaces, or types.
+    For new files or full rewrites, use create_file(overwrite=True).
 
-    If any step fails the file is rolled back. No silent half-writes.
+    WORKFLOW:
+      1. recall(file_path) → get symbol names
+      2. edit(file_path, "function:charge", "WHY you're changing this", new_code)
+      3. check(file_path)  → verify nothing else went stale
 
     Args:
-        file_path:   Relative path to the file (e.g. "src/billing/stripe.py").
-        symbol_name: Prefixed symbol to replace (e.g. "function:charge", "class:Customer").
-                     Call recall(file_path) first to see valid symbol names.
-        thought:     WHY you are making this change. Be specific — business reason, not just what.
-        new_code:    The complete new source code for this symbol only (not the whole file).
+        file_path:   File containing the symbol ("src/billing/stripe.py").
+        symbol_name: Exact prefixed symbol name from index() ("function:charge", "class:Customer",
+                     "interface:PaymentConfig", "type:OrderStatus", "enum:Currency").
+        thought:     Concrete reason for this change. Business context preferred over "refactored X".
+        new_code:    Complete new source for this symbol only (not the whole file).
 
-    Returns:
-        JSON with thought_id, new AST hash, and confirmation the file was updated.
+    Returns JSON: {status, thought_id, new_ast_hash, symbols_reindexed}
+    On error: {status:"error", message} with file unchanged.
     """
     logger.debug(f"edit() file={file_path} symbol={symbol_name}")
 
@@ -592,9 +571,8 @@ def edit(file_path: str, symbol_name: str, thought: str, new_code: str) -> str:
     })
 
 
-@mcp.tool()
 def debug_info() -> str:
-    """Diagnostic info: DB path, workspace root, node count. Call if something seems wrong."""
+    """Internal diagnostic — not exposed as an MCP tool. Call from CLI: python main.py --cli debug"""
     node_count = 0
     try:
         node_count = db.conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
@@ -626,6 +604,8 @@ if __name__ == "__main__":
             print(index(sys.argv[3]))
         elif command == "check" and len(sys.argv) > 3:
             print(check(sys.argv[3]))
+        elif command == "debug":
+            print(debug_info())
         else:
             print(json.dumps({"error": f"Unknown command: {command}"}))
             sys.exit(1)
