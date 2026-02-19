@@ -204,57 +204,87 @@ def recall(
             "tip": "Pass a symbol name or keyword to get full details across dimensions.",
         })
 
-    # ── Resolve to a node_id ───────────────────────────────────────────────
+    # ── Resolve to a node_id or file_path ────────────────────────────────
     node_id = None
     file_path = None
 
     if q.startswith("code:"):
         node_id = q
     else:
+        # Try exact symbol match: code:{any_file}:{q}
         row = db.conn.execute(
             "SELECT id FROM nodes WHERE id LIKE ? AND type='CODE_BLOCK' LIMIT 1",
             (f"code:%:{q}",),
         ).fetchone()
         if row:
             node_id = dict(row)["id"]
+        else:
+            # Try as a file path: code:{q}:% — finds any symbol in that file
+            rel_q = _to_rel_path(q)
+            row = db.conn.execute(
+                "SELECT id FROM nodes WHERE id LIKE ? AND type='CODE_BLOCK' LIMIT 1",
+                (f"code:{rel_q}:%",),
+            ).fetchone()
+            if row:
+                # File has indexed symbols — pick one to anchor the result, query at file level
+                node_id = dict(row)["id"]
+                file_path = rel_q  # override: query dimensions for the whole file
+            elif "/" in q or q.endswith((".py", ".ts", ".tsx", ".js", ".jsx")):
+                # File path with NO indexed symbols (e.g. procedural scripts) — still query dimensions
+                file_path = rel_q
 
-    if node_id:
+    if node_id and file_path is None:
         # Extract file_path from node_id: code:{file}:{symbol}
         parts = node_id.split(":", 2)
         if len(parts) == 3:
             file_path = parts[1]
 
     # ── Fan out to dimension providers ────────────────────────────────────
-    if node_id:
-        node = db.get_node(node_id)
+    if node_id or file_path:
+        # Collect symbols listed in this file (for display, even if no symbol was the query target)
+        symbols_in_file = []
+        if file_path:
+            sym_rows = db.conn.execute(
+                "SELECT id FROM nodes WHERE id LIKE ? AND type='CODE_BLOCK'",
+                (f"code:{file_path}:%",),
+            ).fetchall()
+            symbols_in_file = [dict(r)["id"].split(":", 2)[2] for r in sym_rows]
+
         result = {
             "query": q,
-            "node_id": node_id,
-            "location": f"{file_path}:{node_id.split(':')[-1]}" if file_path else node_id,
+            "location": file_path or node_id,
             "dimensions": {},
         }
+        if node_id:
+            result["node_id"] = node_id
+        if symbols_in_file:
+            result["symbols"] = symbols_in_file
+
         for dim_name in requested:
             provider = _PROVIDERS.get(dim_name)
             if provider:
                 try:
-                    result["dimensions"][dim_name] = provider.query(node_id, file_path, opts)
+                    result["dimensions"][dim_name] = provider.query(
+                        node_id or f"file:{file_path}", file_path, opts
+                    )
                 except Exception as e:
                     logger.warning(f"Dimension {dim_name} failed: {e}")
                     result["dimensions"][dim_name] = {"error": str(e)}
 
-        # depth=2: also include parent class/file context
-        if depth >= 2 and file_path:
-            file_node_id = f"file:{file_path}"
-            parent = db.get_node(file_node_id)
-            if parent:
-                result["parent_file"] = {"node_id": file_node_id}
+        # depth=2: include symbols-level detail when query was at file level
+        if depth >= 2 and file_path and symbols_in_file:
+            result["symbol_details"] = []
+            for sym_id in symbols_in_file[:5]:  # cap at 5 to avoid bloat
+                sym_node_id = f"code:{file_path}:{sym_id}"
+                sym_dims = {}
                 for dim_name in requested:
                     provider = _PROVIDERS.get(dim_name)
                     if provider:
                         try:
-                            result["parent_file"][dim_name] = provider.query(file_node_id, file_path, opts)
+                            sym_dims[dim_name] = provider.query(sym_node_id, file_path, opts)
                         except Exception:
                             pass
+                result["symbol_details"].append({"symbol": sym_id, "dimensions": sym_dims})
 
         return json.dumps(result)
 
