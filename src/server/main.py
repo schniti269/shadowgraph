@@ -184,8 +184,38 @@ def recall(
     opts = filter or {}
     requested = dimensions if dimensions is not None else _ALL_DIMENSIONS
 
-    # ── Empty query: index listing ─────────────────────────────────────────
+    # ── Empty query ────────────────────────────────────────────────────────
     if not q or q == "*":
+        # If specific dimensions requested → workspace roll-up
+        if dimensions is not None:
+            rollup = {"query": "*", "scope": "workspace", "dimensions": {}}
+            for dim_name in requested:
+                provider = _PROVIDERS.get(dim_name)
+                if not provider:
+                    continue
+                # Dimensions that support a workspace-level summary get one batch call
+                if dim_name == "git" and hasattr(provider, "workspace_summary"):
+                    rollup["dimensions"][dim_name] = provider.workspace_summary(opts)
+                else:
+                    # Fallback: fan-out per indexed file
+                    files = [
+                        dict(r)["file_path"]
+                        for r in db.conn.execute(
+                            "SELECT DISTINCT file_path FROM anchors ORDER BY file_path"
+                        ).fetchall()
+                    ]
+                    file_results = []
+                    for fp in files:
+                        try:
+                            data = provider.query(f"file:{fp}", fp, opts)
+                            data["file"] = fp
+                            file_results.append(data)
+                        except Exception:
+                            pass
+                    rollup["dimensions"][dim_name] = file_results
+            return json.dumps(rollup)
+
+        # Default: business context + symbol listing
         biz = db.conn.execute(
             """
             SELECT n.id, n.content FROM nodes n
