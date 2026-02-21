@@ -16,9 +16,20 @@ LANG_MAP: dict[str, str] = {
 # Tree-sitter node types that represent top-level symbols
 SYMBOL_NODE_TYPES: dict[str, list[str]] = {
     "python": ["function_definition", "class_definition"],
-    "typescript": ["function_declaration", "class_declaration", "method_definition"],
-    "tsx": ["function_declaration", "class_declaration", "method_definition"],
-    "javascript": ["function_declaration", "class_declaration", "method_definition"],
+    "typescript": [
+        "function_declaration", "class_declaration", "method_definition",
+        "interface_declaration", "type_alias_declaration", "enum_declaration",
+        "lexical_declaration",  # catches: export const foo = () => ...
+    ],
+    "tsx": [
+        "function_declaration", "class_declaration", "method_definition",
+        "interface_declaration", "type_alias_declaration", "enum_declaration",
+        "lexical_declaration",
+    ],
+    "javascript": [
+        "function_declaration", "class_declaration", "method_definition",
+        "lexical_declaration",
+    ],
 }
 
 
@@ -33,13 +44,24 @@ def extract_symbol_name(node) -> str | None:
     for child in node.children:
         if child.type in ("identifier", "property_identifier", "name", "type_identifier"):
             return child.text.decode("utf-8")
+        # lexical_declaration: const foo = () => ... → dig into variable_declarator
+        if child.type == "variable_declarator":
+            for grandchild in child.children:
+                if grandchild.type == "identifier":
+                    return grandchild.text.decode("utf-8")
     return None
 
 
 def get_symbol_type_prefix(node_type: str) -> str:
-    """Return 'class' or 'function' prefix based on the node type."""
+    """Return a type prefix based on the node type."""
     if "class" in node_type:
         return "class"
+    if "interface" in node_type:
+        return "interface"
+    if "type_alias" in node_type:
+        return "type"
+    if "enum" in node_type:
+        return "enum"
     return "function"
 
 

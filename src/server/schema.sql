@@ -33,3 +33,16 @@ CREATE INDEX IF NOT EXISTS idx_edges_source ON edges(source_id);
 CREATE INDEX IF NOT EXISTS idx_edges_target ON edges(target_id);
 CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
 CREATE INDEX IF NOT EXISTS idx_nodes_path ON nodes(path);
+
+-- git_facts: cached git dimension data per file/symbol
+-- Stored in DuckDB (shadow-facts.duckdb) but schema defined here for reference.
+-- Invalidated by file mtime. fact_type: 'commits' | 'churn' | 'authors'
+-- CREATE TABLE IF NOT EXISTS git_facts (
+--     file_path TEXT NOT NULL,
+--     symbol_name TEXT,
+--     fact_type TEXT NOT NULL,
+--     content TEXT NOT NULL,
+--     fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+--     file_mtime REAL,
+--     PRIMARY KEY (file_path, symbol_name, fact_type)
+-- );
