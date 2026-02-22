@@ -142,7 +142,9 @@
         "typescript": "^5.6.0"
     },
     "dependencies": {
+        "@types/cytoscape": "^3.21.9",
         "@vscode/vsce": "^3.7.1",
+        "cytoscape": "^3.33.1",
         "sql.js": "^1.11.0"
     },
     "optionalDependencies": {
